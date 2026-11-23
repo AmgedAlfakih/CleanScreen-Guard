@@ -1,0 +1,15 @@
+# Virtual environment & Python cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# PyInstaller & Inno Setup build outputs
+build/
+dist/
+*.spec
+
+# User local settings & downloaded AI models
+settings.json
+models/*.onnx
+models/*.pt

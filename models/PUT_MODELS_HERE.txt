@@ -1,0 +1,7 @@
+Drop any compatible YOLO / NudeNet .onnx models into this folder!
+
+Examples:
+- NudeNet 640m.onnx (Higher accuracy for realistic & stylized 3D games)
+- Custom / Anime YOLO NSFW .onnx models (for 2D / cel-shaded anime games)
+
+Then open Settings (click the CleanScreen Guard tray icon) -> click "Refresh Models" -> select your model!
