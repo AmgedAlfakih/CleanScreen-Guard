@@ -5,6 +5,11 @@ from typing import Optional, Set
 
 from src.paths import get_settings_path
 
+APP_VERSION = "1.0.0"
+# Automatically set to your real repo URL when built via GitHub Actions,
+# or edit this line manually before running build_exe.bat locally:
+OFFICIAL_GITHUB_URL = "https://github.com/AmgedAlfakih/CleanScreen-Guard"
+
 BUILTIN_MODEL_ID = "__builtin_nudenet_320n__"
 NONE_MODEL_ID = ""
 

@@ -1,3 +1,4 @@
+import html
 import os
 from typing import Tuple
 from PySide6.QtCore import Qt, Signal
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.config import AppConfig, NONE_MODEL_ID
+from src.config import APP_VERSION, AppConfig, NONE_MODEL_ID, OFFICIAL_GITHUB_URL
 from src.detector import list_available_models
 from src.i18n import SUPPORTED_LANGUAGES, is_rtl, tr
 from src.paths import get_models_dir
@@ -23,7 +24,7 @@ from src.win32_utils import is_startup_enabled, set_startup_enabled
 
 
 class SettingsDialog(QDialog):
-    """Live Settings window with English/Arabic RTL, Windows Auto-Start, and Model Selector."""
+    """Live Settings window with English/Arabic RTL, Windows Auto-Start, Model Selector, and Official GitHub Footer."""
 
     settings_changed = Signal()
     models_changed = Signal(str, str)
@@ -53,6 +54,7 @@ class SettingsDialog(QDialog):
             QGroupBox::title { subcontrol-origin: margin; left: 10px; right: 10px; padding: 0 4px; }
             QLabel { color: #D4D4D8; }
             QLabel#statusLbl { color: #60A5FA; font-size: 12px; font-weight: normal; }
+            QLabel#footerLbl { color: #A1A1AA; font-size: 11.5px; padding-top: 4px; }
             QCheckBox { color: #F4F4F5; spacing: 6px; }
             QComboBox {
                 background-color: #27272A; color: #F4F4F5; border: 1px solid #52525B;
@@ -224,6 +226,15 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(self.close_btn)
         root.addLayout(btn_row)
 
+        # --- Official Free & Open-Source GitHub Footer ---
+        self.footer_label = QLabel()
+        self.footer_label.setObjectName("footerLbl")
+        self.footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.footer_label.setTextFormat(Qt.TextFormat.RichText)
+        self.footer_label.setOpenExternalLinks(True)
+        self.footer_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        root.addWidget(self.footer_label)
+
     def _retranslate_ui(self) -> None:
         lang = self._cfg.language
         direction = Qt.LayoutDirection.RightToLeft if is_rtl(lang) else Qt.LayoutDirection.LeftToRight
@@ -264,6 +275,14 @@ class SettingsDialog(QDialog):
 
         self.reset_btn.setText(tr(lang, "btn_reset"))
         self.close_btn.setText(tr(lang, "btn_done"))
+
+        oss_txt = html.escape(tr(lang, "footer_oss"))
+        gh_txt = html.escape(tr(lang, "footer_github_link"))
+        url = html.escape(OFFICIAL_GITHUB_URL, quote=True)
+        self.footer_label.setText(
+            f'CleanScreen Guard v{APP_VERSION} — {oss_txt} • '
+            f'<a href="{url}" style="color:#60A5FA; text-decoration:none;">{gh_txt}</a>'
+        )
 
         self._refresh_model_lists()
         self._refresh_labels()
