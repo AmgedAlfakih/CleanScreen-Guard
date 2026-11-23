@@ -8,7 +8,7 @@
 > **100% Offline, Open-Source, and No Malware:** CleanScreen Guard makes **zero network connections** and never uploads or saves screenshots. Everything runs locally on your PC's GPU.
 >
 > Because this is a free, indie open-source app and is not yet signed with a paid Microsoft code-signing certificate, Windows Defender SmartScreen may display *"Windows protected your PC"* when running the installer. Click **More info → Run anyway** to install—or inspect the full source code in `src/` and build `CleanScreenGuard.exe` yourself using `build_exe.bat`.
-> *(Tip: Replace this line with your VirusTotal scan link after compiling your release!)*
+> *(Link will be provided later when my internet is stable)*
 
 ---
 
