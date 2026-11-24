@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CleanScreen Guard — Settings</title>
+<style>
+  :root {
+    --bg: #18181b; --card: #222226; --border: #3f3f46;
+    --text: #f4f4f5; --muted: #a1a1aa; --accent: #2563eb; --accent-h: #1d4ed8;
+  }
+  * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+  body { margin: 0; padding: 14px; background: var(--bg); color: var(--text); font-size: 13px; user-select: none; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .card h3 { margin: 0 0 8px 0; font-size: 12.5px; color: #e4e4e7; letter-spacing: 0.2px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; }
+  .row label { color: #d4d4d8; flex: 1; }
+  select { background: #27272a; color: var(--text); border: 1px solid #52525b; border-radius: 5px; padding: 5px 8px; min-width: 240px; }
+  input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .val { min-width: 64px; text-align: end; color: #93c5fd; font-variant-numeric: tabular-nums; }
+  .chk { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+  .status { color: #60a5fa; font-size: 12px; margin-top: 4px; }
+  .btns { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 7px 14px; font-weight: 600; cursor: pointer; }
+  button:hover { background: var(--accent-h); }
+  button.sec { background: #3f3f46; }
+  button.sec:hover { background: #52525b; }
+  .footer { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 10px; }
+  .footer a { color: #60a5fa; text-decoration: none; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h3 data-i18n="grp_general">General &amp; Language</h3>
+    <div class="row">
+      <label data-i18n="lbl_language">Interface Language:</label>
+      <select id="language">
+        <option value="en">English</option>
+        <option value="ar">العربية (Arabic)</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="autostart" /><span data-i18n="chk_autostart">Start automatically when Windows starts</span></label>
+  </div>
+
+  <div class="card">
+    <h3 data-i18n="grp_models">AI Model &amp; Hardware (Native Rust + DirectML)</h3>
+    <div class="row">
+      <label data-i18n="lbl_primary_model">Primary Model:</label>
+      <select id="primary_model"></select>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_compute_device">Hardware Accelerator:</label>
+      <select id="compute_device">
+        <option value="power_saving" data-i18n="dev_power_saving">Power Saving GPU (Integrated GPU — Best for Laptops)</option>
+        <option value="auto" data-i18n="dev_auto">Auto (System Default GPU)</option>
+        <option value="high_performance" data-i18n="dev_high_performance">High Performance GPU (Dedicated RTX/RX)</option>
+        <option value="cpu" data-i18n="dev_cpu">CPU Only (0% GPU Usage)</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="use_fp16" /><span data-i18n="chk_fp16">FP16 Half-Precision on GPU (Faster &amp; Lower VRAM)</span></label>
+    <div class="row">
+      <div class="status" id="model_status">Loading model...</div>
+      <button class="sec" id="btn_open_models" data-i18n="btn_open_models">Open models/ Folder</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 data-i18n="grp_performance">Async Rust Engine &amp; Blur</h3>
+    <div class="row">
+      <label data-i18n="lbl_sensitivity">Sensitivity Threshold:</label>
+      <input type="range" id="confidence_threshold" min="10" max="75" />
+      <span class="val" id="v_conf">0.22</span>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_hold_time">Anti-Flicker Hold Time:</label>
+      <input type="range" id="box_hold_seconds" min="5" max="150" />
+      <span class="val" id="v_hold">0.35 s</span>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_padding">Blur Box Padding:</label>
+      <input type="range" id="box_padding_px" min="0" max="80" />
+      <span class="val" id="v_pad">28 px</span>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_blur_strength">Blur Strength:</label>
+      <input type="range" id="blur_strength" min="10" max="100" />
+      <span class="val" id="v_blur">85%</span>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_ai_fps">AI Scan Rate (GPU Load):</label>
+      <input type="range" id="ai_scan_fps" min="2" max="20" />
+      <span class="val" id="v_ai">6 Hz</span>
+    </div>
+    <div class="row">
+      <label data-i18n="lbl_fps">Smooth Tracking FPS:</label>
+      <input type="range" id="target_fps" min="10" max="30" />
+      <span class="val" id="v_fps">24 FPS</span>
+    </div>
+    <label class="chk"><input type="checkbox" id="optical_flow_tracking" /><span data-i18n="chk_optical_flow">Pure-Rust Motion Tracking Between AI Scans (Ultra-Low GPU)</span></label>
+    <label class="chk"><input type="checkbox" id="adaptive_scan_rate" /><span data-i18n="chk_adaptive_rate">Adaptive Scan Rate (Auto-Cruise at 50% GPU on Clean Screens)</span></label>
+    <label class="chk"><input type="checkbox" id="debug_overlay" /><span data-i18n="chk_debug">Debug Mode (Show Red Detection Boxes)</span></label>
+  </div>
+
+  <div class="card">
+    <h3 data-i18n="grp_categories">What to Censor (NudeNet Categories)</h3>
+    <div class="grid2">
+      <label class="chk"><input type="checkbox" id="blur_genitalia_exposed" /><span data-i18n="chk_genitalia">Exposed Genitalia</span></label>
+      <label class="chk"><input type="checkbox" id="blur_breasts_exposed" /><span data-i18n="chk_breasts">Exposed Breasts</span></label>
+      <label class="chk"><input type="checkbox" id="blur_buttocks_exposed" /><span data-i18n="chk_buttocks">Exposed Buttocks</span></label>
+      <label class="chk"><input type="checkbox" id="blur_anus_exposed" /><span data-i18n="chk_anus">Exposed Anus</span></label>
+      <label class="chk"><input type="checkbox" id="blur_bikini_covered" /><span data-i18n="chk_bikini">Bikinis / Covered Suggestive</span></label>
+      <label class="chk"><input type="checkbox" id="blur_belly_exposed" /><span data-i18n="chk_belly">Exposed Belly / Midriff</span></label>
+    </div>
+  </div>
+
+  <div class="btns">
+    <button class="sec" id="btn_reset" data-i18n="btn_reset">Reset Defaults</button>
+    <button id="btn_done" data-i18n="btn_done">Done</button>
+  </div>
+
+  <div class="footer">
+    <span id="footer_ver">CleanScreen Guard v2.0.0 (Rust)</span> —
+    <span data-i18n="footer_oss">Free &amp; Open Source (AGPL-3.0)</span> •
+    <a id="github_link" data-i18n="footer_github_link">Official GitHub</a>
+  </div>
+
+<script>
+const I18N = {
+  en: {
+    grp_general: "General & Language", lbl_language: "Interface Language:",
+    chk_autostart: "Start automatically when Windows starts",
+    grp_models: "AI Model & Hardware (Native Rust + DirectML)",
+    lbl_primary_model: "Primary Model:", lbl_compute_device: "Hardware Accelerator:",
+    dev_power_saving: "Power Saving GPU (Integrated GPU — Best for Laptops)",
+    dev_auto: "Auto (System Default GPU)", dev_high_performance: "High Performance GPU (Dedicated RTX/RX)",
+    dev_cpu: "CPU Only (0% GPU Usage)", chk_fp16: "FP16 Half-Precision on GPU (Faster & Lower VRAM)",
+    btn_open_models: "Open models/ Folder", grp_performance: "Async Rust Engine & Blur",
+    lbl_sensitivity: "Sensitivity Threshold:", lbl_hold_time: "Anti-Flicker Hold Time:",
+    lbl_padding: "Blur Box Padding:", lbl_blur_strength: "Blur Strength:",
+    lbl_ai_fps: "AI Scan Rate (GPU Load):", lbl_fps: "Smooth Tracking FPS:",
+    chk_optical_flow: "Pure-Rust Motion Tracking Between AI Scans (Ultra-Low GPU)",
+    chk_adaptive_rate: "Adaptive Scan Rate (Auto-Cruise at 50% GPU on Clean Screens)",
+    chk_debug: "Debug Mode (Show Red Detection Boxes)",
+    grp_categories: "What to Censor (NudeNet Categories)",
+    chk_genitalia: "Exposed Genitalia", chk_breasts: "Exposed Breasts",
+    chk_buttocks: "Exposed Buttocks", chk_anus: "Exposed Anus",
+    chk_bikini: "Bikinis / Covered Suggestive", chk_belly: "Exposed Belly / Midriff",
+    btn_reset: "Reset Defaults", btn_done: "Done",
+    footer_oss: "Free & Open Source (AGPL-3.0)", footer_github_link: "Official GitHub"
+  },
+  ar: {
+    grp_general: "عام واللغة", lbl_language: "لغة الواجهة:",
+    chk_autostart: "تشغيل البرنامج تلقائياً مع بدء ويندوز",
+    grp_models: "نموذج الذكاء الاصطناعي والعتاد (Rust + DirectML)",
+    lbl_primary_model: "النموذج الأساسي:", lbl_compute_device: "معالج التشغيل:",
+    dev_power_saving: "كرت الشاشة المدمج (الأفضل للابتوب والألعاب — هادئ)",
+    dev_auto: "تلقائي (افتراضي النظام)", dev_high_performance: "كرت الشاشة المنفصل (RTX/RX)",
+    dev_cpu: "المعالج فقط (استهلاك 0% لكرت الشاشة)", chk_fp16: "تفعيل FP16 نصف الدقة على كرت الشاشة",
+    btn_open_models: "فتح مجلد النماذج", grp_performance: "المحرك غير المتزامن والتمويه",
+    lbl_sensitivity: "حساسية الاكتشاف:", lbl_hold_time: "مدة ثبات التمويه:",
+    lbl_padding: "هامش التمويه الإضافي:", lbl_blur_strength: "قوة التمويه:",
+    lbl_ai_fps: "معدل فحص الذكاء الاصطناعي:", lbl_fps: "سلاسة تتبع التمويه:",
+    chk_optical_flow: "تتبع الحركة الذكي بين الفحوصات (أقل استهلاك لكرت الشاشة)",
+    chk_adaptive_rate: "معدل فحص تكيّفي (توفير 50% عند نظافة الشاشة)",
+    chk_debug: "وضع التصحيح (إظهار المربعات الحمراء)",
+    grp_categories: "المناطق المراد تمويهها (تصنيفات NudeNet)",
+    chk_genitalia: "المناطق الحساسة المكشوفة", chk_breasts: "الصدر المكشوف",
+    chk_buttocks: "المؤخرة المكشوفة", chk_anus: "المناطق الخلفية الفاضحة",
+    chk_bikini: "ملابس السباحة / البكيني والمحتوى المثير", chk_belly: "البطن / الخصر المكشوف",
+    btn_reset: "استعادة الافتراضي", btn_done: "تم",
+    footer_oss: "مجاني ومفتوح المصدر (AGPL-3.0)", footer_github_link: "صفحة GitHub الرسمية"
+  }
+};
+
+function applyLang(lang) {
+  const dict = I18N[lang] || I18N.en;
+  document.documentElement.lang = lang;
+  document.documentElement.dir = (lang === "ar") ? "rtl" : "ltr";
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    const k = el.getAttribute("data-i18n");
+    if (dict[k]) el.textContent = dict[k];
+  });
+}
+
+function post(msg) { window.ipc.postMessage(JSON.stringify(msg)); }
+
+function refreshLabels() {
+  document.getElementById("v_conf").textContent = (document.getElementById("confidence_threshold").value / 100).toFixed(2);
+  document.getElementById("v_hold").textContent = (document.getElementById("box_hold_seconds").value / 100).toFixed(2) + " s";
+  document.getElementById("v_pad").textContent = document.getElementById("box_padding_px").value + " px";
+  document.getElementById("v_blur").textContent = document.getElementById("blur_strength").value + "%";
+  document.getElementById("v_ai").textContent = document.getElementById("ai_scan_fps").value + " Hz";
+  document.getElementById("v_fps").textContent = document.getElementById("target_fps").value + " FPS";
+}
+
+function collectConfig() {
+  return {
+    language: document.getElementById("language").value,
+    compute_device: document.getElementById("compute_device").value,
+    use_fp16: document.getElementById("use_fp16").checked,
+    primary_model: document.getElementById("primary_model").value,
+    secondary_model: "",
+    ai_scan_fps: parseInt(document.getElementById("ai_scan_fps").value, 10),
+    target_fps: parseInt(document.getElementById("target_fps").value, 10),
+    optical_flow_tracking: document.getElementById("optical_flow_tracking").checked,
+    adaptive_scan_rate: document.getElementById("adaptive_scan_rate").checked,
+    scan_mode: "fast",
+    confidence_threshold: parseInt(document.getElementById("confidence_threshold").value, 10) / 100.0,
+    box_hold_seconds: parseInt(document.getElementById("box_hold_seconds").value, 10) / 100.0,
+    box_padding_px: parseInt(document.getElementById("box_padding_px").value, 10),
+    blur_strength: parseInt(document.getElementById("blur_strength").value, 10),
+    debug_overlay: document.getElementById("debug_overlay").checked,
+    blur_genitalia_exposed: document.getElementById("blur_genitalia_exposed").checked,
+    blur_breasts_exposed: document.getElementById("blur_breasts_exposed").checked,
+    blur_buttocks_exposed: document.getElementById("blur_buttocks_exposed").checked,
+    blur_anus_exposed: document.getElementById("blur_anus_exposed").checked,
+    blur_bikini_covered: document.getElementById("blur_bikini_covered").checked,
+    blur_belly_exposed: document.getElementById("blur_belly_exposed").checked
+  };
+}
+
+window.__loadState = function(state) {
+  const c = state.config;
+  const sel = document.getElementById("primary_model");
+  sel.innerHTML = "";
+  (state.models || []).forEach(([label, id]) => {
+    const opt = document.createElement("option");
+    opt.value = id; opt.textContent = label;
+    sel.appendChild(opt);
+  });
+  document.getElementById("language").value = c.language;
+  document.getElementById("autostart").checked = !!state.autostart;
+  document.getElementById("primary_model").value = c.primary_model;
+  document.getElementById("compute_device").value = c.compute_device;
+  document.getElementById("use_fp16").checked = c.use_fp16;
+  document.getElementById("confidence_threshold").value = Math.round(c.confidence_threshold * 100);
+  document.getElementById("box_hold_seconds").value = Math.round(c.box_hold_seconds * 100);
+  document.getElementById("box_padding_px").value = c.box_padding_px;
+  document.getElementById("blur_strength").value = c.blur_strength;
+  document.getElementById("ai_scan_fps").value = c.ai_scan_fps;
+  document.getElementById("target_fps").value = c.target_fps;
+  document.getElementById("optical_flow_tracking").checked = c.optical_flow_tracking;
+  document.getElementById("adaptive_scan_rate").checked = c.adaptive_scan_rate;
+  document.getElementById("debug_overlay").checked = c.debug_overlay;
+  document.getElementById("blur_genitalia_exposed").checked = c.blur_genitalia_exposed;
+  document.getElementById("blur_breasts_exposed").checked = c.blur_breasts_exposed;
+  document.getElementById("blur_buttocks_exposed").checked = c.blur_buttocks_exposed;
+  document.getElementById("blur_anus_exposed").checked = c.blur_anus_exposed;
+  document.getElementById("blur_bikini_covered").checked = c.blur_bikini_covered;
+  document.getElementById("blur_belly_exposed").checked = c.blur_belly_exposed;
+  if (state.status) document.getElementById("model_status").textContent = state.status;
+  applyLang(c.language);
+  refreshLabels();
+};
+
+document.querySelectorAll("input, select").forEach(el => {
+  el.addEventListener("change", () => {
+    refreshLabels();
+    if (el.id === "autostart") { post({ cmd: "set_autostart", enabled: el.checked }); return; }
+    if (el.id === "language") applyLang(el.value);
+    const reload = (el.id === "primary_model" || el.id === "compute_device" || el.id === "use_fp16");
+    post({ cmd: "update_config", config: collectConfig(), reload_model: reload });
+  });
+  if (el.type === "range") el.addEventListener("input", refreshLabels);
+});
+
+document.getElementById("btn_open_models").onclick = () => post({ cmd: "open_models" });
+document.getElementById("btn_reset").onclick = () => post({ cmd: "reset_defaults" });
+document.getElementById("btn_done").onclick = () => post({ cmd: "hide_window" });
+document.getElementById("github_link").onclick = () => post({ cmd: "open_github" });
+
+post({ cmd: "ready" });
+</script>
+</body>
+</html>

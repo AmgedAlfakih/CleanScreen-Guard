@@ -1,5 +1,0 @@
-PySide6>=6.7.0
-dxcam>=0.0.5
-opencv-python>=4.10.0
-numpy>=1.26.0
-nudenet>=3.4.0
