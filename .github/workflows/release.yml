@@ -41,11 +41,12 @@ jobs:
         run: |
           .\scripts\fetch_runtime.ps1
 
-      - name: Fetch NudeNet 320n model & convert to FP16
+      - name: Fetch NudeNet 640m & 320n models and convert to FP16
         shell: pwsh
         run: |
           pip install --quiet nudenet onnx onnxconverter-common onnxruntime
-          python -c "import os, shutil, nudenet, onnx; from onnxconverter_common import float16; src = os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx'); shutil.copy(src, 'runtime/320n.onnx'); m = float16.convert_float_to_float16(onnx.load(src), keep_io_types=True, disable_shape_infer=True); onnx.save(m, 'runtime/320n_fp16.onnx'); print('FP16 model ready!')"
+          Invoke-WebRequest -Uri "https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/640m.onnx" -OutFile "runtime/640m_tmp.onnx"
+          python -c "import os, shutil, nudenet, onnx; from onnxconverter_common import float16; src320 = os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx'); shutil.copy(src320, 'runtime/320n.onnx'); onnx.save(float16.convert_float_to_float16(onnx.load(src320), keep_io_types=True, disable_shape_infer=True), 'runtime/320n_fp16.onnx'); onnx.save(float16.convert_float_to_float16(onnx.load('runtime/640m_tmp.onnx'), keep_io_types=True, disable_shape_infer=True), 'runtime/640m_fp16.onnx'); os.remove('runtime/640m_tmp.onnx'); print('Runtime files:', os.listdir('runtime'))"
 
       - name: Build CleanScreenGuard.exe (Release)
         shell: pwsh
@@ -85,12 +86,13 @@ jobs:
           Complete native **Rust** rewrite of CleanScreen Guard (~$sizeMb MB installer, ~40–60 MB RAM, zero Python/Qt/OpenCV bloat).
 
           ### Highlights
+          - **Built-in NudeNet 640m (FP16 Default) + 320n:** High-accuracy 640m runs by default on GPU, with 320n included for ultra-low GPU or CPU-only fallback.
           - **Native DXGI Desktop Duplication + UpdateLayeredWindow:** Raw BGRA capture and per-pixel-alpha click-through overlay with ``WDA_EXCLUDEFROMCAPTURE``.
           - **DirectML GPU + FP16:** Powered by ``ort`` 2.0 + Microsoft ONNX Runtime DirectML with Power-Saving iGPU, Dedicated RTX/RX, and CPU-only modes.
           - **Async AI Thread + Pure-Rust Motion Tracking:** Smooth 24–30 FPS box tracking between AI keyframes, Adaptive Scan Rate, and 0% GPU True Idle Sleep.
           - **Windows 11 WebView2 Settings (EN / العربية RTL):** Crisp dark-mode UI with zero extra installer size.
 
-          ### Security
+          ### Security & Verification
           - **Cloud-Built from Public Source** via GitHub Actions.
           - **SHA-256:** ``$sha256``
 
