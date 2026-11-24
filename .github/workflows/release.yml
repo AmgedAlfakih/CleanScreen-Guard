@@ -50,12 +50,12 @@ jobs:
           $sizeMb = [math]::Round((Get-Item "runtime/640m_tmp.onnx").Length / 1MB, 2)
           Write-Host "Downloaded 640m_tmp.onnx: $sizeMb MB"
           if ($sizeMb -lt 50) {
-            Write-Host "File is too small — first 200 bytes:"
+            Write-Host "File is too small — first 5 lines:"
             Get-Content "runtime/640m_tmp.onnx" -TotalCount 5
             exit 1
           }
 
-          python -c @"
+          @'
           import os, shutil, nudenet, onnx
           from onnxconverter_common import float16
 
@@ -69,7 +69,11 @@ jobs:
           os.remove('runtime/640m_tmp.onnx')
           print('640m converted OK')
           print('Runtime files:', os.listdir('runtime'))
-          "@
+          '@ | Set-Content "convert_models.py" -Encoding UTF8
+
+          python convert_models.py
+          Remove-Item "convert_models.py" -Force
+
       - name: Build CleanScreenGuard.exe (Release)
         shell: pwsh
         run: |
