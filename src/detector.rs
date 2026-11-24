@@ -248,10 +248,12 @@ impl FastNSFWDetector {
         Ok(())
     }
 
-    fn build_model(&self, path: &Path, compute_device: &str) -> Result<LoadedModel> {
+   fn build_model(&self, path: &Path, compute_device: &str) -> Result<LoadedModel> {
         let mut builder = Session::builder(&self.env)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?;
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("{e}"))?
+            .with_intra_threads(2)
+            .map_err(|e| anyhow!("{e}"))?;
 
         if compute_device != "cpu" {
             let pref = match compute_device {
@@ -260,7 +262,9 @@ impl FastNSFWDetector {
                 _ => PerformancePreference::Default,
             };
             let dml = DirectML::default().with_performance_preference(pref).build();
-            builder = builder.with_execution_providers([dml])?;
+            builder = builder
+                .with_execution_providers([dml])
+                .map_err(|e| anyhow!("{e}"))?;
         }
 
         let mut session = builder.commit_from_file(path)?;

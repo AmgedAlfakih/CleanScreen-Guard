@@ -7,13 +7,13 @@ $dmlVer = "1.15.4"
 New-Item -ItemType Directory -Force -Path "runtime" | Out-Null
 
 Write-Host "[1/2] Downloading Microsoft.ML.OnnxRuntime.DirectML $ortVer (NuGet)..."
-$ortZip = "runtime\ort_dml.nupkg"
+$ortZip = "runtime\ort_dml.zip"
 Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$ortVer" -OutFile $ortZip
 Expand-Archive -Path $ortZip -DestinationPath "runtime\ort_tmp" -Force
 Copy-Item "runtime\ort_tmp\runtimes\win-x64\native\onnxruntime.dll" "runtime\onnxruntime.dll" -Force
 
 Write-Host "[2/2] Downloading Microsoft.AI.DirectML $dmlVer (NuGet)..."
-$dmlZip = "runtime\dml.nupkg"
+$dmlZip = "runtime\dml.zip"
 Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$dmlVer" -OutFile $dmlZip
 Expand-Archive -Path $dmlZip -DestinationPath "runtime\dml_tmp" -Force
 Copy-Item "runtime\dml_tmp\bin\x64-win\DirectML.dll" "runtime\DirectML.dll" -Force
