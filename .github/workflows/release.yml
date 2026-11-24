@@ -41,38 +41,18 @@ jobs:
         run: |
           .\scripts\fetch_runtime.ps1
 
-      - name: Fetch NudeNet 640m & 320n models and convert to FP16
+      - name: Fetch NudeNet 640m (FP16) & 320n models
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           pip install --quiet nudenet onnx onnxconverter-common onnxruntime
-          curl.exe -fSL --retry 3 --retry-delay 5 "https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/640m.onnx" -o "runtime/640m_tmp.onnx"
-
-          $sizeMb = [math]::Round((Get-Item "runtime/640m_tmp.onnx").Length / 1MB, 2)
-          Write-Host "Downloaded 640m_tmp.onnx: $sizeMb MB"
-          if ($sizeMb -lt 50) {
-            Write-Host "File is too small — first 5 lines:"
-            Get-Content "runtime/640m_tmp.onnx" -TotalCount 5
+          gh release download models-v1 -p "640m_fp16.onnx" -D "runtime" --clobber
+          if (-not (Test-Path "runtime/640m_fp16.onnx")) {
+            Write-Error "Failed to download 640m_fp16.onnx from models-v1 release."
             exit 1
           }
-
-          @'
-          import os, shutil, nudenet, onnx
-          from onnxconverter_common import float16
-
-          src320 = os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx')
-          shutil.copy(src320, 'runtime/320n.onnx')
-          onnx.save(float16.convert_float_to_float16(onnx.load(src320), keep_io_types=True, disable_shape_infer=True), 'runtime/320n_fp16.onnx')
-          print('320n converted OK')
-
-          m640 = onnx.load('runtime/640m_tmp.onnx')
-          onnx.save(float16.convert_float_to_float16(m640, keep_io_types=True, disable_shape_infer=True), 'runtime/640m_fp16.onnx')
-          os.remove('runtime/640m_tmp.onnx')
-          print('640m converted OK')
-          print('Runtime files:', os.listdir('runtime'))
-          '@ | Set-Content "convert_models.py" -Encoding UTF8
-
-          python convert_models.py
-          Remove-Item "convert_models.py" -Force
+          python -c "import os, shutil, nudenet, onnx; from onnxconverter_common import float16; src320 = os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx'); shutil.copy(src320, 'runtime/320n.onnx'); onnx.save(float16.convert_float_to_float16(onnx.load(src320), keep_io_types=True, disable_shape_infer=True), 'runtime/320n_fp16.onnx'); print('Runtime files:', os.listdir('runtime'))"
 
       - name: Build CleanScreenGuard.exe (Release)
         shell: pwsh
