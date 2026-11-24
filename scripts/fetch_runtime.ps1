@@ -20,4 +20,4 @@ Copy-Item "runtime\dml_tmp\bin\x64-win\DirectML.dll" "runtime\DirectML.dll" -For
 
 Remove-Item -Recurse -Force "runtime\ort_tmp", "runtime\dml_tmp", $ortZip, $dmlZip
 Write-Host "Done! runtime\onnxruntime.dll and runtime\DirectML.dll are ready."
-Write-Host "Tip: Also place 320n_fp16.onnx (or 320n.onnx) into runtime\ or models\."
+Write-Host "Tip: Also place 640m.onnx / 320n.onnx (or _fp16 versions) into runtime\ or models\."

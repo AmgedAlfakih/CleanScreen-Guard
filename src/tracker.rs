@@ -94,6 +94,14 @@ impl RegionTracker {
         }
     }
 
+    /// Expire tracks whose last AI confirmation is older than hold_seconds.
+    pub fn prune_expired(&mut self, now: f64, hold_seconds: f32) -> bool {
+        let before = self.tracks.len();
+        self.tracks
+            .retain(|tr| (now - tr.last_seen) <= hold_seconds as f64);
+        self.tracks.len() != before
+    }
+
     pub fn get_boxes(&self) -> Vec<((i32, i32, i32, i32), String)> {
         self.tracks
             .iter()
@@ -144,7 +152,6 @@ impl RegionTracker {
             let bx2 = ((tr.x2 * sx) as i32).clamp(bx1 + 4, gw as i32 - 2);
             let by2 = ((tr.y2 * sy) as i32).clamp(by1 + 4, gh as i32 - 2);
 
-            // Search +/- 12 px on 320px thumbnail (stride 2 coarse, then +/- 2 fine)
             let mut best_dx = 0i32;
             let mut best_dy = 0i32;
             let mut best_sad = u64::MAX;

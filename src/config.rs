@@ -10,6 +10,7 @@ use windows::Win32::System::Registry::{
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const OFFICIAL_GITHUB_URL: &str = "https://github.com/AmgedAlfakih/CleanScreen-Guard";
+pub const BUILTIN_MODEL_640M_ID: &str = "__builtin_nudenet_640m__";
 pub const BUILTIN_MODEL_ID: &str = "__builtin_nudenet_320n__";
 pub const NONE_MODEL_ID: &str = "";
 
@@ -53,7 +54,7 @@ impl Default for AppConfig {
             language: "en".to_string(),
             compute_device: "power_saving".to_string(),
             use_fp16: true,
-            primary_model: BUILTIN_MODEL_ID.to_string(),
+            primary_model: BUILTIN_MODEL_640M_ID.to_string(),
             secondary_model: NONE_MODEL_ID.to_string(),
             ai_scan_fps: 6,
             target_fps: 24,
@@ -106,7 +107,16 @@ impl AppConfig {
     pub fn load() -> Self {
         let path = get_settings_path();
         if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&text) {
+            if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) {
+                let lower = cfg.primary_model.to_lowercase();
+                if lower.is_empty()
+                    || lower.ends_with("640m.onnx")
+                    || lower.ends_with("640m_fp16.onnx")
+                {
+                    cfg.primary_model = BUILTIN_MODEL_640M_ID.to_string();
+                } else if lower.ends_with("320n.onnx") || lower.ends_with("320n_fp16.onnx") {
+                    cfg.primary_model = BUILTIN_MODEL_ID.to_string();
+                }
                 return cfg;
             }
         }

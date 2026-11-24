@@ -6,7 +6,7 @@ fn main() {
         res.set_icon("assets/app_icon.ico");
         res.set("ProductName", "CleanScreen Guard");
         res.set("FileDescription", "CleanScreen Guard — Real-Time Desktop NSFW Blur Overlay");
-        res.set("CompanyName", "CleanScreen Guard Project");
+        res.set("CompanyName", "Amged Alfakih");
         res.set("LegalCopyright", "Open Source (AGPL-3.0)");
         res.set("OriginalFilename", "CleanScreenGuard.exe");
         res.set("InternalName", "CleanScreenGuard");

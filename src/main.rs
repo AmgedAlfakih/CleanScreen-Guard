@@ -17,7 +17,7 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -265,12 +265,20 @@ fn main() {
                 let start = Instant::now();
                 let mut last_ai_submit = 0.0f64;
                 let mut last_hit_time = 0.0f64;
+                let mut last_scene_cut_seq: u64 = 0;
+                let mut last_scan_confirmed_tracks = false;
+                let mut ai_in_flight = false;
+                let mut needs_post_motion_scan = false;
 
                 while st.running.load(Ordering::Relaxed) {
                     let t0 = Instant::now();
                     if st.paused.load(Ordering::Relaxed) {
                         tracker.clear();
                         overlay.clear();
+                        last_scan_confirmed_tracks = false;
+                        ai_in_flight = false;
+                        needs_post_motion_scan = false;
+                        last_scene_cut_seq = 0;
                         thread::sleep(Duration::from_millis(80));
                         continue;
                     }
@@ -278,13 +286,33 @@ fn main() {
                     let cfg = st.cfg.lock().unwrap().clone();
                     let now = start.elapsed().as_secs_f64();
 
+                    if ai_in_flight && (now - last_ai_submit) > 1.5 {
+                        ai_in_flight = false;
+                    }
+
                     // 1. Drain async AI result without blocking
                     let mut reconciled = false;
                     if let Some(res) = st.ai_result.lock().unwrap().take() {
+                        ai_in_flight = false;
                         if !res.padded_detections.is_empty() {
                             last_hit_time = now;
+                            last_scan_confirmed_tracks = true;
+                        } else {
+                            last_scan_confirmed_tracks = false;
                         }
-                        if let Some((ref bgra, w, h)) = last_frame {
+
+                        let cleared_by_scene_cut = res.padded_detections.is_empty()
+                            && last_scene_cut_seq > 0
+                            && res.frame_seq >= last_scene_cut_seq;
+                        if last_scene_cut_seq > 0 && res.frame_seq >= last_scene_cut_seq {
+                            last_scene_cut_seq = 0;
+                        }
+
+                        if cleared_by_scene_cut {
+                            tracker.clear();
+                            overlay.clear();
+                            reconciled = true;
+                        } else if let Some((ref bgra, w, h)) = last_frame {
                             let boxes = tracker.update(
                                 &res.padded_detections,
                                 now,
@@ -315,14 +343,27 @@ fn main() {
                         let is_still = prev_gray.is_some() && change < 0.0015;
                         if is_still {
                             if tracker.has_tracks() {
-                                tracker.keep_alive(now);
+                                if last_scan_confirmed_tracks && !ai_in_flight {
+                                    tracker.keep_alive(now);
+                                } else if tracker.prune_expired(now, cfg.box_hold_seconds) {
+                                    let patches: Vec<BlurPatch> = tracker
+                                        .get_boxes()
+                                        .into_iter()
+                                        .filter_map(|(b, l)| {
+                                            blur_region_bgra(&f.bgra, f.width, f.height, b, cfg.blur_strength, l)
+                                        })
+                                        .collect();
+                                    overlay.update_patches(&patches, cfg.debug_overlay);
+                                }
                             }
-                            if now - last_ai_submit < 2.5 {
+                            if !needs_post_motion_scan && (now - last_ai_submit) < 2.5 {
                                 prev_gray = Some((curr_gray, gw, gh));
                                 last_frame = Some((f.bgra, f.width, f.height));
-                                thread::sleep(Duration::from_millis(100));
+                                thread::sleep(Duration::from_millis(80));
                                 continue;
                             }
+                        } else {
+                            needs_post_motion_scan = true;
                         }
 
                         // Adaptive 3-Tier Scan Rate
@@ -338,11 +379,15 @@ fn main() {
                         let scene_cut = change >= 0.14 && (now - last_ai_submit) >= 0.05;
                         if scene_cut {
                             last_hit_time = now;
+                            last_scene_cut_seq = frame_seq;
+                            last_scan_confirmed_tracks = false;
                             tracker.reset_velocities();
                         }
 
                         if prev_gray.is_none() || scene_cut || (now - last_ai_submit) >= (1.0 / eff_hz) {
                             last_ai_submit = now;
+                            needs_post_motion_scan = false;
+                            ai_in_flight = true;
                             let (lock, cvar) = &st.ai_mailbox;
                             *lock.lock().unwrap() = Some(AIJob {
                                 frame_seq,
@@ -381,8 +426,42 @@ fn main() {
 
                         prev_gray = Some((curr_gray, gw, gh));
                         last_frame = Some((f.bgra, f.width, f.height));
-                    } else if tracker.has_tracks() {
-                        tracker.keep_alive(now);
+                    } else {
+                        let ai_interval = 1.0 / cfg.ai_scan_fps.max(1) as f64;
+                        if needs_post_motion_scan && !ai_in_flight && (now - last_ai_submit) >= ai_interval {
+                            if let Some((ref bgra, w, h)) = last_frame {
+                                last_ai_submit = now;
+                                needs_post_motion_scan = false;
+                                last_scan_confirmed_tracks = false;
+                                ai_in_flight = true;
+                                let (lock, cvar) = &st.ai_mailbox;
+                                *lock.lock().unwrap() = Some(AIJob {
+                                    frame_seq,
+                                    width: w,
+                                    height: h,
+                                    bgra: bgra.clone(),
+                                    cfg: cfg.clone(),
+                                });
+                                cvar.notify_one();
+                            }
+                        } else if tracker.has_tracks() {
+                            if last_scan_confirmed_tracks && !ai_in_flight {
+                                tracker.keep_alive(now);
+                            } else if tracker.prune_expired(now, cfg.box_hold_seconds) {
+                                if let Some((ref bgra, w, h)) = last_frame {
+                                    let patches: Vec<BlurPatch> = tracker
+                                        .get_boxes()
+                                        .into_iter()
+                                        .filter_map(|(b, l)| {
+                                            blur_region_bgra(bgra, w, h, b, cfg.blur_strength, l)
+                                        })
+                                        .collect();
+                                    overlay.update_patches(&patches, cfg.debug_overlay);
+                                } else {
+                                    overlay.clear();
+                                }
+                            }
+                        }
                     }
 
                     let target_ms = if tracker.has_tracks() {
@@ -419,6 +498,7 @@ fn main() {
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("CleanScreen Guard v2.0 (Rust) — Click for Settings")
         .with_icon(active_icon.clone())
         .build()
@@ -437,7 +517,12 @@ fn main() {
 
     let p_tray = proxy.clone();
     TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
-        if let TrayIconEvent::Click { .. } = ev {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = ev
+        {
             let _ = p_tray.send_event(UserEvent::TrayClick);
         }
     }));

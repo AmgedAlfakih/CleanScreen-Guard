@@ -10,7 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::config::{get_data_dir, get_exe_dir, get_models_dir, BUILTIN_MODEL_ID, NONE_MODEL_ID};
+use crate::config::{
+    get_data_dir, get_exe_dir, get_models_dir, BUILTIN_MODEL_640M_ID, BUILTIN_MODEL_ID,
+    NONE_MODEL_ID,
+};
 
 pub const NUDENET_LABELS: [&str; 18] = [
     "FEMALE_GENITALIA_COVERED",
@@ -44,22 +47,40 @@ pub struct Detection {
 }
 
 pub fn list_available_models() -> Vec<(String, String)> {
-    let mut out = vec![(
-        "Built-in: NudeNet 320n (Fast — Realistic & 3D)".to_string(),
-        BUILTIN_MODEL_ID.to_string(),
-    )];
-    let mut seen = HashSet::new();
+    let mut out = vec![
+        (
+            "Built-in: NudeNet 640m (High Accuracy — Default)".to_string(),
+            BUILTIN_MODEL_640M_ID.to_string(),
+        ),
+        (
+            "Built-in: NudeNet 320n (Fast — Lowest GPU)".to_string(),
+            BUILTIN_MODEL_ID.to_string(),
+        ),
+    ];
+    let mut seen = HashSet::from([
+        "320n.onnx".to_string(),
+        "320n_fp16.onnx".to_string(),
+        "640m.onnx".to_string(),
+        "640m_fp16.onnx".to_string(),
+    ]);
     for dir in [get_models_dir(), get_exe_dir().join("models")] {
         if let Ok(entries) = fs::read_dir(&dir) {
             let mut names: Vec<_> = entries.flatten().collect();
             names.sort_by_key(|e| e.file_name());
             for entry in names {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("onnx")).unwrap_or(false) {
+                if path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("onnx"))
+                    .unwrap_or(false)
+                {
                     if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
                         let key = fname.to_lowercase();
                         if seen.insert(key) {
-                            let mb = fs::metadata(&path).map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
+                            let mb = fs::metadata(&path)
+                                .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+                                .unwrap_or(0.0);
                             out.push((format!("{fname} ({mb:.1} MB)"), format!("models\\{fname}")));
                         }
                     }
@@ -86,16 +107,17 @@ pub fn resolve_model_path(model_id: &str, prefer_fp16: bool) -> Option<PathBuf> 
         return None;
     }
     let exe_dir = get_exe_dir();
-    if model_id == BUILTIN_MODEL_ID {
+    if model_id == BUILTIN_MODEL_640M_ID || model_id == BUILTIN_MODEL_ID {
+        let stem = if model_id == BUILTIN_MODEL_640M_ID { "640m" } else { "320n" };
         let mut candidates = Vec::new();
         if prefer_fp16 {
-            candidates.push(exe_dir.join("models").join("320n_fp16.onnx"));
-            candidates.push(exe_dir.join("runtime").join("320n_fp16.onnx"));
-            candidates.push(get_models_dir().join("320n_fp16.onnx"));
+            candidates.push(exe_dir.join("models").join(format!("{stem}_fp16.onnx")));
+            candidates.push(exe_dir.join("runtime").join(format!("{stem}_fp16.onnx")));
+            candidates.push(get_models_dir().join(format!("{stem}_fp16.onnx")));
         }
-        candidates.push(exe_dir.join("models").join("320n.onnx"));
-        candidates.push(exe_dir.join("runtime").join("320n.onnx"));
-        candidates.push(get_models_dir().join("320n.onnx"));
+        candidates.push(exe_dir.join("models").join(format!("{stem}.onnx")));
+        candidates.push(exe_dir.join("runtime").join(format!("{stem}.onnx")));
+        candidates.push(get_models_dir().join(format!("{stem}.onnx")));
         return candidates.into_iter().find(|p| p.is_file());
     }
 
@@ -168,7 +190,7 @@ impl FastNSFWDetector {
 
     pub fn status_text(&self) -> String {
         if self.models.is_empty() {
-            return "No model loaded (place 320n_fp16.onnx in models/)".to_string();
+            return "No model loaded (place 640m.onnx or 320n.onnx in models/)".to_string();
         }
         let names = self
             .models
@@ -237,9 +259,12 @@ impl FastNSFWDetector {
         }
 
         if loaded.is_empty() {
-            if let Some(fb) = resolve_model_path(BUILTIN_MODEL_ID, false) {
-                if let Ok(m) = self.build_model(&fb, compute_device) {
-                    loaded.push(m);
+            for fb_id in [BUILTIN_MODEL_640M_ID, BUILTIN_MODEL_ID] {
+                if let Some(fb) = resolve_model_path(fb_id, false) {
+                    if let Ok(m) = self.build_model(&fb, compute_device) {
+                        loaded.push(m);
+                        break;
+                    }
                 }
             }
         }
@@ -248,7 +273,7 @@ impl FastNSFWDetector {
         Ok(())
     }
 
-   fn build_model(&self, path: &Path, compute_device: &str) -> Result<LoadedModel> {
+    fn build_model(&self, path: &Path, compute_device: &str) -> Result<LoadedModel> {
         let mut builder = Session::builder(&self.env)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow!("{e}"))?
@@ -326,7 +351,6 @@ impl FastNSFWDetector {
             let nw = ((frame_w as f32 * scale).round() as usize).clamp(1, size);
             let nh = ((frame_h as f32 * scale).round() as usize).clamp(1, size);
 
-            // Fill reusable CHW RGB letterbox tensor directly from native BGRA frame
             model.f32_buf.fill(0.0);
             let plane = size * size;
             let inv_255 = 1.0f32 / 255.0f32;
@@ -340,7 +364,6 @@ impl FastNSFWDetector {
                     let sx = sx.min(frame_w - 1);
                     let p = row_off + sx * 4;
                     let idx = dst_row + dx;
-                    // BGRA -> RGB CHW normalized [0, 1]
                     model.f32_buf[idx] = frame_bgra[p + 2] as f32 * inv_255;
                     model.f32_buf[plane + idx] = frame_bgra[p + 1] as f32 * inv_255;
                     model.f32_buf[2 * plane + idx] = frame_bgra[p] as f32 * inv_255;
@@ -371,7 +394,7 @@ impl FastNSFWDetector {
 
             let inv_scale = 1.0f32 / scale;
             let (rows, cols, transposed) = if dims[1] < dims[2] {
-                (dims[2], dims[1], true) // YOLO [1, 22, 2100]
+                (dims[2], dims[1], true)
             } else {
                 (dims[1], dims[2], false)
             };

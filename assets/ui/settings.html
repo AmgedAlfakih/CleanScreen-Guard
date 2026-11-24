@@ -229,9 +229,13 @@ window.__loadState = function(state) {
     opt.value = id; opt.textContent = label;
     sel.appendChild(opt);
   });
+
   document.getElementById("language").value = c.language;
   document.getElementById("autostart").checked = !!state.autostart;
   document.getElementById("primary_model").value = c.primary_model;
+  if (!sel.value && sel.options.length > 0) {
+    sel.selectedIndex = 0;
+  }
   document.getElementById("compute_device").value = c.compute_device;
   document.getElementById("use_fp16").checked = c.use_fp16;
   document.getElementById("confidence_threshold").value = Math.round(c.confidence_threshold * 100);

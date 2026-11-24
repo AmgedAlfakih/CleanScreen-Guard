@@ -3,7 +3,7 @@
 #ifndef MyAppVersion
   #define MyAppVersion "2.0.0"
 #endif
-#define MyAppPublisher "CleanScreen Guard Project"
+#define MyAppPublisher "Amged Alfakih"
 #define MyAppExeName "CleanScreenGuard.exe"
 
 [Setup]
@@ -40,6 +40,7 @@ Source: "target\release\CleanScreenGuard.exe"; DestDir: "{app}"; Flags: ignoreve
 Source: "runtime\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "runtime\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "runtime\320n*.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "runtime\640m*.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
