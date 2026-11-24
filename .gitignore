@@ -1,15 +1,10 @@
-# Virtual environment & Python cache
-.venv/
-venv/
-__pycache__/
-*.py[cod]
+# Rust build artifacts
+/target/
+Cargo.lock
 
-# PyInstaller & Inno Setup build outputs
-build/
-dist/
-*.spec
-
-# User local settings & downloaded AI models
-settings.json
+# Packaged installer & downloaded runtime DLLs / models
+/dist/
+/runtime/
 models/*.onnx
 models/*.pt
+settings.json
