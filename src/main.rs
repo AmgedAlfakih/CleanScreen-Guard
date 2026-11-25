@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use wry::WebViewBuilder;
 
 use crate::blur::{blur_region_bgra, BlurPatch};
-use crate::capture::DesktopCapturer;
+use crate::capture::{CaptureMode, DesktopCapturer};
 use crate::config::{
     get_models_dir, is_startup_enabled, set_startup_enabled, AppConfig, OFFICIAL_GITHUB_URL,
 };
@@ -42,7 +42,7 @@ enum UserEvent {
     MenuSettings,
     MenuTogglePause,
     MenuQuit,
-    StatusUpdated(String),
+    StatusUpdated,
     IpcMessage(String),
 }
 
@@ -67,10 +67,13 @@ enum IpcCmd {
 
 struct AIJob {
     frame_seq: u64,
-    width: usize,
-    height: usize,
+    screen_width: usize,
+    screen_height: usize,
+    ai_width: usize,
+    ai_height: usize,
     bgra: Vec<u8>,
     cfg: AppConfig,
+    allow_scout: bool,
 }
 
 struct AIResult {
@@ -86,6 +89,32 @@ struct SharedState {
     status_text: Mutex<String>,
     ai_mailbox: (Mutex<Option<AIJob>>, Condvar),
     ai_result: Mutex<Option<AIResult>>,
+    frame_pool: Mutex<Vec<Vec<u8>>>,
+}
+
+impl SharedState {
+    fn copy_into_pooled_buf(&self, src: &[u8]) -> Vec<u8> {
+        let mut buf = self
+            .frame_pool
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(src.len()));
+        buf.clear();
+        buf.extend_from_slice(src);
+        buf
+    }
+
+    fn recycle_buf(&self, mut buf: Vec<u8>) {
+        if buf.capacity() == 0 {
+            return;
+        }
+        buf.clear();
+        let mut pool = self.frame_pool.lock().unwrap();
+        if pool.len() < 2 {
+            pool.push(buf);
+        }
+    }
 }
 
 fn load_tray_icon(bytes: &[u8]) -> Icon {
@@ -99,19 +128,27 @@ fn load_tray_icon(bytes: &[u8]) -> Icon {
     Icon::from_rgba(vec![220, 38, 38, 255].repeat(16 * 16), 16, 16).unwrap()
 }
 
-fn downscale_bgra_to_gray320(bgra: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
-    let scale = 320.0f32 / (w.max(h) as f32);
-    let gw = ((w as f32 * scale).round() as usize).max(16);
-    let gh = ((h as f32 * scale).round() as usize).max(16);
+/// Converts GPU-downscaled BGRA frame into a consistent 320px-long-edge grayscale buffer
+/// whose dimensions always match the screen aspect ratio across Scout/Verify/Full modes.
+fn downscale_bgra_to_gray320(
+    bgra: &[u8],
+    src_w: usize,
+    src_h: usize,
+    screen_w: usize,
+    screen_h: usize,
+) -> (Vec<u8>, usize, usize) {
+    let scale = 320.0f32 / (screen_w.max(screen_h) as f32);
+    let gw = ((screen_w as f32 * scale).round() as usize).max(16);
+    let gh = ((screen_h as f32 * scale).round() as usize).max(16);
     let mut gray = vec![0u8; gw * gh];
-    let sx = w as f32 / gw as f32;
-    let sy = h as f32 / gh as f32;
+    let sx = src_w as f32 / gw as f32;
+    let sy = src_h as f32 / gh as f32;
     for y in 0..gh {
         let src_y = ((y as f32 + 0.5) * sy) as usize;
-        let row = src_y.min(h - 1) * w * 4;
+        let row = src_y.min(src_h - 1) * src_w * 4;
         for x in 0..gw {
             let src_x = ((x as f32 + 0.5) * sx) as usize;
-            let i = row + src_x.min(w - 1) * 4;
+            let i = row + src_x.min(src_w - 1) * 4;
             let b = bgra[i] as u32;
             let g = bgra[i + 1] as u32;
             let r = bgra[i + 2] as u32;
@@ -153,6 +190,7 @@ fn main() {
         status_text: Mutex::new("Loading DirectML model...".to_string()),
         ai_mailbox: (Mutex::new(None), Condvar::new()),
         ai_result: Mutex::new(None),
+        frame_pool: Mutex::new(Vec::with_capacity(2)),
     });
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -171,17 +209,16 @@ fn main() {
                     &init_cfg.secondary_model,
                     &init_cfg.compute_device,
                     init_cfg.use_fp16,
+                    init_cfg.cascade_mode,
                 ) {
                     Ok(d) => {
-                        let s = d.status_text();
-                        *st.status_text.lock().unwrap() = s.clone();
-                        let _ = p_status.send_event(UserEvent::StatusUpdated(s));
+                        *st.status_text.lock().unwrap() = d.status_text();
+                        let _ = p_status.send_event(UserEvent::StatusUpdated);
                         d
                     }
                     Err(e) => {
-                        let msg = format!("Model init error: {e}");
-                        *st.status_text.lock().unwrap() = msg.clone();
-                        let _ = p_status.send_event(UserEvent::StatusUpdated(msg));
+                        *st.status_text.lock().unwrap() = format!("Model init error: {e}");
+                        let _ = p_status.send_event(UserEvent::StatusUpdated);
                         return;
                     }
                 };
@@ -195,10 +232,10 @@ fn main() {
                             &c.secondary_model,
                             &c.compute_device,
                             c.use_fp16,
+                            c.cascade_mode,
                         );
-                        let s = detector.status_text();
-                        *st.status_text.lock().unwrap() = s.clone();
-                        let _ = p_status.send_event(UserEvent::StatusUpdated(s));
+                        *st.status_text.lock().unwrap() = detector.status_text();
+                        let _ = p_status.send_event(UserEvent::StatusUpdated);
                     }
 
                     let job = {
@@ -214,21 +251,29 @@ fn main() {
                     let labels = job.cfg.active_labels();
                     let dets = detector.detect(
                         &job.bgra,
-                        job.width,
-                        job.height,
+                        job.ai_width,
+                        job.ai_height,
                         &labels,
                         job.cfg.confidence_threshold,
+                        job.allow_scout,
+                        job.cfg.cascade_scout_threshold,
                     );
+                    st.recycle_buf(job.bgra);
+
                     let pad = job.cfg.box_padding_px;
+                    let sx = job.screen_width as f32 / job.ai_width.max(1) as f32;
+                    let sy = job.screen_height as f32 / job.ai_height.max(1) as f32;
                     let padded = dets
                         .into_iter()
                         .map(|d| {
                             (
                                 (
-                                    (d.x1 - pad).max(0),
-                                    (d.y1 - pad).max(0),
-                                    (d.x2 + pad).min(job.width as i32),
-                                    (d.y2 + pad).min(job.height as i32),
+                                    ((d.x1 as f32 * sx).round() as i32 - pad).max(0),
+                                    ((d.y1 as f32 * sy).round() as i32 - pad).max(0),
+                                    ((d.x2 as f32 * sx).round() as i32 + pad)
+                                        .min(job.screen_width as i32),
+                                    ((d.y2 as f32 * sy).round() as i32 + pad)
+                                        .min(job.screen_height as i32),
                                 ),
                                 format!("{} ({:.2})", d.label, d.score),
                             )
@@ -243,7 +288,7 @@ fn main() {
             .ok();
     }
 
-    // Dedicated Non-Blocking Capture + Pure-Rust Motion Tracking + Native Overlay Thread
+    // Dedicated Non-Blocking Capture + GPU Downscale + Motion Tracking + Native Overlay Thread
     {
         let st = Arc::clone(&shared);
         thread::Builder::new()
@@ -260,11 +305,13 @@ fn main() {
 
                 let mut tracker = RegionTracker::new();
                 let mut prev_gray: Option<(Vec<u8>, usize, usize)> = None;
-                let mut last_frame: Option<(Vec<u8>, usize, usize)> = None;
+                let mut last_full_frame: Option<(Vec<u8>, usize, usize)> = None;
+                let mut last_ai_frame: Option<(Vec<u8>, usize, usize, usize, usize)> = None;
                 let mut frame_seq: u64 = 0;
                 let start = Instant::now();
                 let mut last_ai_submit = 0.0f64;
-                let mut last_hit_time = 0.0f64;
+                let mut last_hit_time = -10.0f64;
+                let mut last_full_verify = 0.0f64;
                 let mut last_scene_cut_seq: u64 = 0;
                 let mut last_scan_confirmed_tracks = false;
                 let mut ai_in_flight = false;
@@ -275,6 +322,7 @@ fn main() {
                     if st.paused.load(Ordering::Relaxed) {
                         tracker.clear();
                         overlay.clear();
+                        last_full_frame = None;
                         last_scan_confirmed_tracks = false;
                         ai_in_flight = false;
                         needs_post_motion_scan = false;
@@ -311,30 +359,69 @@ fn main() {
                         if cleared_by_scene_cut {
                             tracker.clear();
                             overlay.clear();
+                            last_full_frame = None;
                             reconciled = true;
-                        } else if let Some((ref bgra, w, h)) = last_frame {
-                            let boxes = tracker.update(
-                                &res.padded_detections,
-                                now,
-                                cfg.box_hold_seconds,
-                                res.frame_seq,
-                                w,
-                                h,
-                            );
-                            let patches: Vec<BlurPatch> = boxes
-                                .into_iter()
-                                .filter_map(|(b, l)| blur_region_bgra(bgra, w, h, b, cfg.blur_strength, l))
-                                .collect();
-                            overlay.update_patches(&patches, cfg.debug_overlay);
-                            reconciled = true;
+                        } else {
+                            // If detections just appeared while in low-bandwidth Scout/Verify mode,
+                            // immediately pull full-res mip 0 from VRAM so blur patches render crisply.
+                            if !res.padded_detections.is_empty() && last_full_frame.is_none() {
+                                last_full_frame = capturer.readback_full_res();
+                            }
+
+                            if let Some((ref bgra, w, h)) = last_full_frame {
+                                let boxes = tracker.update(
+                                    &res.padded_detections,
+                                    now,
+                                    cfg.box_hold_seconds,
+                                    res.frame_seq,
+                                    w,
+                                    h,
+                                );
+                                if boxes.is_empty() {
+                                    overlay.clear();
+                                    last_full_frame = None;
+                                } else {
+                                    let patches: Vec<BlurPatch> = boxes
+                                        .into_iter()
+                                        .filter_map(|(b, l)| {
+                                            blur_region_bgra(bgra, w, h, b, cfg.blur_strength, l)
+                                        })
+                                        .collect();
+                                    overlay.update_patches(&patches, cfg.debug_overlay);
+                                }
+                                reconciled = true;
+                            } else if !tracker.has_tracks() {
+                                overlay.clear();
+                            }
                         }
                     }
 
-                    // 2. Grab native BGRA frame via DXGI Desktop Duplication
-                    let frame = capturer.grab(16);
+                    // 2. Choose lowest-bandwidth D3D11 GPU capture mode for this tick
+                    let periodic_verify_due = (now - last_full_verify)
+                        >= cfg.cascade_verify_interval_secs.max(1.0) as f64;
+                    let capture_mode = if tracker.has_tracks() {
+                        CaptureMode::FullAndAi
+                    } else if !cfg.cascade_mode
+                        || (now - last_hit_time) < 2.5
+                        || periodic_verify_due
+                        || prev_gray.is_none()
+                    {
+                        CaptureMode::Verify
+                    } else {
+                        CaptureMode::Scout
+                    };
+
+                    // 3. Grab GPU-downscaled frame via DXGI Desktop Duplication + D3D11 mipmaps
+                    let frame = capturer.grab(16, capture_mode);
                     if let Some(f) = frame {
                         frame_seq += 1;
-                        let (curr_gray, gw, gh) = downscale_bgra_to_gray320(&f.bgra, f.width, f.height);
+                        let (curr_gray, gw, gh) = downscale_bgra_to_gray320(
+                            &f.ai_bgra,
+                            f.ai_width,
+                            f.ai_height,
+                            f.screen_width,
+                            f.screen_height,
+                        );
                         let change = prev_gray
                             .as_ref()
                             .map(|(pg, _, _)| motion_change_ratio(pg, &curr_gray))
@@ -346,19 +433,42 @@ fn main() {
                                 if last_scan_confirmed_tracks && !ai_in_flight {
                                     tracker.keep_alive(now);
                                 } else if tracker.prune_expired(now, cfg.box_hold_seconds) {
-                                    let patches: Vec<BlurPatch> = tracker
-                                        .get_boxes()
-                                        .into_iter()
-                                        .filter_map(|(b, l)| {
-                                            blur_region_bgra(&f.bgra, f.width, f.height, b, cfg.blur_strength, l)
-                                        })
-                                        .collect();
-                                    overlay.update_patches(&patches, cfg.debug_overlay);
+                                    if let Some(ref full) = f.full_bgra {
+                                        let patches: Vec<BlurPatch> = tracker
+                                            .get_boxes()
+                                            .into_iter()
+                                            .filter_map(|(b, l)| {
+                                                blur_region_bgra(
+                                                    full,
+                                                    f.screen_width,
+                                                    f.screen_height,
+                                                    b,
+                                                    cfg.blur_strength,
+                                                    l,
+                                                )
+                                            })
+                                            .collect();
+                                        overlay.update_patches(&patches, cfg.debug_overlay);
+                                    } else {
+                                        overlay.clear();
+                                    }
+                                    if !tracker.has_tracks() {
+                                        last_full_frame = None;
+                                    }
                                 }
                             }
                             if !needs_post_motion_scan && (now - last_ai_submit) < 2.5 {
                                 prev_gray = Some((curr_gray, gw, gh));
-                                last_frame = Some((f.bgra, f.width, f.height));
+                                if let Some(full) = f.full_bgra {
+                                    last_full_frame = Some((full, f.screen_width, f.screen_height));
+                                }
+                                last_ai_frame = Some((
+                                    f.ai_bgra,
+                                    f.ai_width,
+                                    f.ai_height,
+                                    f.screen_width,
+                                    f.screen_height,
+                                ));
                                 thread::sleep(Duration::from_millis(80));
                                 continue;
                             }
@@ -366,7 +476,7 @@ fn main() {
                             needs_post_motion_scan = true;
                         }
 
-                        // Adaptive 3-Tier Scan Rate
+                        // Tuned Adaptive 3-Tier Scan Rate
                         let base_hz = cfg.ai_scan_fps.max(1) as f64;
                         let eff_hz = if !cfg.adaptive_scan_rate
                             || tracker.has_tracks()
@@ -374,41 +484,61 @@ fn main() {
                         {
                             base_hz
                         } else {
-                            (base_hz * 0.5).clamp(2.0, 4.0)
+                            (base_hz * 0.5).clamp(1.5, 2.5)
                         };
-                        let scene_cut = change >= 0.14 && (now - last_ai_submit) >= 0.05;
+
+                        // Do NOT reset last_hit_time on scene cuts so 320n scout handles clean cuts first
+                        let scene_cut = change >= 0.16 && (now - last_ai_submit) >= 0.25;
                         if scene_cut {
-                            last_hit_time = now;
                             last_scene_cut_seq = frame_seq;
                             last_scan_confirmed_tracks = false;
                             tracker.reset_velocities();
                         }
 
                         if prev_gray.is_none() || scene_cut || (now - last_ai_submit) >= (1.0 / eff_hz) {
+                            let allow_scout = cfg.cascade_mode
+                                && !tracker.has_tracks()
+                                && (now - last_hit_time) >= 2.5
+                                && !periodic_verify_due
+                                && prev_gray.is_some();
+                            if !allow_scout {
+                                last_full_verify = now;
+                            }
+
                             last_ai_submit = now;
                             needs_post_motion_scan = false;
                             ai_in_flight = true;
+
+                            let pooled = st.copy_into_pooled_buf(&f.ai_bgra);
                             let (lock, cvar) = &st.ai_mailbox;
-                            *lock.lock().unwrap() = Some(AIJob {
+                            let prev_job = lock.lock().unwrap().replace(AIJob {
                                 frame_seq,
-                                width: f.width,
-                                height: f.height,
-                                bgra: f.bgra.clone(),
+                                screen_width: f.screen_width,
+                                screen_height: f.screen_height,
+                                ai_width: f.ai_width,
+                                ai_height: f.ai_height,
+                                bgra: pooled,
                                 cfg: cfg.clone(),
+                                allow_scout,
                             });
+                            if let Some(dropped) = prev_job {
+                                st.recycle_buf(dropped.bgra);
+                            }
                             cvar.notify_one();
                         }
 
                         if cfg.optical_flow_tracking && !reconciled && tracker.has_tracks() {
-                            if let Some((ref pg, pgw, pgh)) = prev_gray {
-                                if pgw == gw && pgh == gh {
+                            if let (Some((pg, pgw, pgh)), Some(full)) =
+                                (&prev_gray, &f.full_bgra)
+                            {
+                                if *pgw == gw && *pgh == gh {
                                     let boxes = tracker.track_motion(
                                         pg,
                                         &curr_gray,
                                         gw,
                                         gh,
-                                        f.width,
-                                        f.height,
+                                        f.screen_width,
+                                        f.screen_height,
                                         now,
                                         cfg.box_hold_seconds,
                                         frame_seq,
@@ -416,7 +546,14 @@ fn main() {
                                     let patches: Vec<BlurPatch> = boxes
                                         .into_iter()
                                         .filter_map(|(b, l)| {
-                                            blur_region_bgra(&f.bgra, f.width, f.height, b, cfg.blur_strength, l)
+                                            blur_region_bgra(
+                                                full,
+                                                f.screen_width,
+                                                f.screen_height,
+                                                b,
+                                                cfg.blur_strength,
+                                                l,
+                                            )
                                         })
                                         .collect();
                                     overlay.update_patches(&patches, cfg.debug_overlay);
@@ -425,30 +562,58 @@ fn main() {
                         }
 
                         prev_gray = Some((curr_gray, gw, gh));
-                        last_frame = Some((f.bgra, f.width, f.height));
+                        if let Some(full) = f.full_bgra {
+                            last_full_frame = Some((full, f.screen_width, f.screen_height));
+                        } else if !tracker.has_tracks() {
+                            last_full_frame = None;
+                        }
+                        last_ai_frame = Some((
+                            f.ai_bgra,
+                            f.ai_width,
+                            f.ai_height,
+                            f.screen_width,
+                            f.screen_height,
+                        ));
                     } else {
                         let ai_interval = 1.0 / cfg.ai_scan_fps.max(1) as f64;
-                        if needs_post_motion_scan && !ai_in_flight && (now - last_ai_submit) >= ai_interval {
-                            if let Some((ref bgra, w, h)) = last_frame {
+                        if needs_post_motion_scan
+                            && !ai_in_flight
+                            && (now - last_ai_submit) >= ai_interval
+                        {
+                            if let Some((ref ai_bgra, aw, ah, sw, sh)) = last_ai_frame {
+                                let allow_scout = cfg.cascade_mode
+                                    && !tracker.has_tracks()
+                                    && (now - last_hit_time) >= 2.5
+                                    && !periodic_verify_due;
+                                if !allow_scout {
+                                    last_full_verify = now;
+                                }
                                 last_ai_submit = now;
                                 needs_post_motion_scan = false;
                                 last_scan_confirmed_tracks = false;
                                 ai_in_flight = true;
+                                let pooled = st.copy_into_pooled_buf(ai_bgra);
                                 let (lock, cvar) = &st.ai_mailbox;
-                                *lock.lock().unwrap() = Some(AIJob {
+                                let prev_job = lock.lock().unwrap().replace(AIJob {
                                     frame_seq,
-                                    width: w,
-                                    height: h,
-                                    bgra: bgra.clone(),
+                                    screen_width: sw,
+                                    screen_height: sh,
+                                    ai_width: aw,
+                                    ai_height: ah,
+                                    bgra: pooled,
                                     cfg: cfg.clone(),
+                                    allow_scout,
                                 });
+                                if let Some(dropped) = prev_job {
+                                    st.recycle_buf(dropped.bgra);
+                                }
                                 cvar.notify_one();
                             }
                         } else if tracker.has_tracks() {
                             if last_scan_confirmed_tracks && !ai_in_flight {
                                 tracker.keep_alive(now);
                             } else if tracker.prune_expired(now, cfg.box_hold_seconds) {
-                                if let Some((ref bgra, w, h)) = last_frame {
+                                if let Some((ref bgra, w, h)) = last_full_frame {
                                     let patches: Vec<BlurPatch> = tracker
                                         .get_boxes()
                                         .into_iter()
@@ -459,6 +624,9 @@ fn main() {
                                     overlay.update_patches(&patches, cfg.debug_overlay);
                                 } else {
                                     overlay.clear();
+                                }
+                                if !tracker.has_tracks() {
+                                    last_full_frame = None;
                                 }
                             }
                         }
@@ -499,7 +667,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_menu_on_left_click(false)
-        .with_tooltip("CleanScreen Guard v2.0 (Rust) — Click for Settings")
+        .with_tooltip("CleanScreen Guard v2.1 (Rust) — Click for Settings")
         .with_icon(active_icon.clone())
         .build()
         .expect("Failed to create tray icon");
@@ -527,7 +695,6 @@ fn main() {
         }
     }));
 
-    // Hidden Settings Window (Windows 11 Edge WebView2 — 0 MB extra installer bloat)
     let window = WindowBuilder::new()
         .with_title("CleanScreen Guard — Settings")
         .with_inner_size(tao::dpi::LogicalSize::new(560.0, 680.0))
@@ -587,7 +754,7 @@ fn main() {
                 shared.running.store(false, Ordering::Relaxed);
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::StatusUpdated(_)) => {
+            Event::UserEvent(UserEvent::StatusUpdated) => {
                 push_state(&webview, &shared);
             }
             Event::UserEvent(UserEvent::IpcMessage(body)) => {

@@ -59,6 +59,7 @@
       </select>
     </div>
     <label class="chk"><input type="checkbox" id="use_fp16" /><span data-i18n="chk_fp16">FP16 Half-Precision on GPU (Faster &amp; Lower VRAM)</span></label>
+    <label class="chk"><input type="checkbox" id="cascade_mode" /><span data-i18n="chk_cascade">Two-Stage Cascade (320n Scout → 640m Verifier — Ultra-Low GPU)</span></label>
     <div class="row">
       <div class="status" id="model_status">Loading model...</div>
       <button class="sec" id="btn_open_models" data-i18n="btn_open_models">Open models/ Folder</button>
@@ -90,7 +91,7 @@
     <div class="row">
       <label data-i18n="lbl_ai_fps">AI Scan Rate (GPU Load):</label>
       <input type="range" id="ai_scan_fps" min="2" max="20" />
-      <span class="val" id="v_ai">6 Hz</span>
+      <span class="val" id="v_ai">4 Hz</span>
     </div>
     <div class="row">
       <label data-i18n="lbl_fps">Smooth Tracking FPS:</label>
@@ -120,7 +121,7 @@
   </div>
 
   <div class="footer">
-    <span id="footer_ver">CleanScreen Guard v2.0.0 (Rust)</span> —
+    <span id="footer_ver">CleanScreen Guard v2.1.0 (Rust)</span> —
     <span data-i18n="footer_oss">Free &amp; Open Source (AGPL-3.0)</span> •
     <a id="github_link" data-i18n="footer_github_link">Official GitHub</a>
   </div>
@@ -135,6 +136,7 @@ const I18N = {
     dev_power_saving: "Power Saving GPU (Integrated GPU — Best for Laptops)",
     dev_auto: "Auto (System Default GPU)", dev_high_performance: "High Performance GPU (Dedicated RTX/RX)",
     dev_cpu: "CPU Only (0% GPU Usage)", chk_fp16: "FP16 Half-Precision on GPU (Faster & Lower VRAM)",
+    chk_cascade: "Two-Stage Cascade (320n Scout → 640m Verifier — Ultra-Low GPU)",
     btn_open_models: "Open models/ Folder", grp_performance: "Async Rust Engine & Blur",
     lbl_sensitivity: "Sensitivity Threshold:", lbl_hold_time: "Anti-Flicker Hold Time:",
     lbl_padding: "Blur Box Padding:", lbl_blur_strength: "Blur Strength:",
@@ -157,6 +159,7 @@ const I18N = {
     dev_power_saving: "كرت الشاشة المدمج (الأفضل للابتوب والألعاب — هادئ)",
     dev_auto: "تلقائي (افتراضي النظام)", dev_high_performance: "كرت الشاشة المنفصل (RTX/RX)",
     dev_cpu: "المعالج فقط (استهلاك 0% لكرت الشاشة)", chk_fp16: "تفعيل FP16 نصف الدقة على كرت الشاشة",
+    chk_cascade: "الفحص المتدرج الذكي (320n للفحص السريع ← 640m للتحقق الدقيق)",
     btn_open_models: "فتح مجلد النماذج", grp_performance: "المحرك غير المتزامن والتمويه",
     lbl_sensitivity: "حساسية الاكتشاف:", lbl_hold_time: "مدة ثبات التمويه:",
     lbl_padding: "هامش التمويه الإضافي:", lbl_blur_strength: "قوة التمويه:",
@@ -172,6 +175,8 @@ const I18N = {
     footer_oss: "مجاني ومفتوح المصدر (AGPL-3.0)", footer_github_link: "صفحة GitHub الرسمية"
   }
 };
+
+let lastConfig = {};
 
 function applyLang(lang) {
   const dict = I18N[lang] || I18N.en;
@@ -201,6 +206,9 @@ function collectConfig() {
     use_fp16: document.getElementById("use_fp16").checked,
     primary_model: document.getElementById("primary_model").value,
     secondary_model: "",
+    cascade_mode: document.getElementById("cascade_mode").checked,
+    cascade_scout_threshold: lastConfig.cascade_scout_threshold ?? 0.15,
+    cascade_verify_interval_secs: lastConfig.cascade_verify_interval_secs ?? 2.5,
     ai_scan_fps: parseInt(document.getElementById("ai_scan_fps").value, 10),
     target_fps: parseInt(document.getElementById("target_fps").value, 10),
     optical_flow_tracking: document.getElementById("optical_flow_tracking").checked,
@@ -222,6 +230,7 @@ function collectConfig() {
 
 window.__loadState = function(state) {
   const c = state.config;
+  lastConfig = c || {};
   const sel = document.getElementById("primary_model");
   sel.innerHTML = "";
   (state.models || []).forEach(([label, id]) => {
@@ -238,6 +247,7 @@ window.__loadState = function(state) {
   }
   document.getElementById("compute_device").value = c.compute_device;
   document.getElementById("use_fp16").checked = c.use_fp16;
+  document.getElementById("cascade_mode").checked = (c.cascade_mode !== false);
   document.getElementById("confidence_threshold").value = Math.round(c.confidence_threshold * 100);
   document.getElementById("box_hold_seconds").value = Math.round(c.box_hold_seconds * 100);
   document.getElementById("box_padding_px").value = c.box_padding_px;
@@ -263,7 +273,12 @@ document.querySelectorAll("input, select").forEach(el => {
     refreshLabels();
     if (el.id === "autostart") { post({ cmd: "set_autostart", enabled: el.checked }); return; }
     if (el.id === "language") applyLang(el.value);
-    const reload = (el.id === "primary_model" || el.id === "compute_device" || el.id === "use_fp16");
+    const reload = (
+      el.id === "primary_model" ||
+      el.id === "compute_device" ||
+      el.id === "use_fp16" ||
+      el.id === "cascade_mode"
+    );
     post({ cmd: "update_config", config: collectConfig(), reload_model: reload });
   });
   if (el.type === "range") el.addEventListener("input", refreshLabels);

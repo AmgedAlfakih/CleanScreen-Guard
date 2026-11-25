@@ -1,7 +1,7 @@
-; Inno Setup 6 / 7 Script for CleanScreen Guard v2.0.0 (Native Rust)
+; Inno Setup 6 / 7 Script for CleanScreen Guard v2.1.0 (Native Rust)
 #define MyAppName "CleanScreen Guard"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0"
+  #define MyAppVersion "2.1.0"
 #endif
 #define MyAppPublisher "Amged Alfakih"
 #define MyAppExeName "CleanScreenGuard.exe"
@@ -39,8 +39,9 @@ Name: "startupicon"; Description: "Start {#MyAppName} automatically when Windows
 Source: "target\release\CleanScreenGuard.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "runtime\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "runtime\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "runtime\320n*.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "runtime\640m*.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "runtime\320n.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "runtime\320n_fp16.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "runtime\640m_fp16.onnx"; DestDir: "{app}\models"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"

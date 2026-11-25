@@ -1,6 +1,6 @@
 [package]
 name = "clean-screen-guard"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 description = "CleanScreen Guard — Real-Time Desktop NSFW Blur Overlay (Native Rust)"
 license = "AGPL-3.0-only"

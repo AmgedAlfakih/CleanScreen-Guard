@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g., 2.0.0)"
+        description: "Release version (e.g., 2.1.0)"
         required: true
-        default: "2.0.0"
+        default: "2.1.0"
   push:
     tags:
       - "v2*"
@@ -46,13 +46,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          pip install --quiet nudenet onnx onnxconverter-common onnxruntime
+          New-Item -ItemType Directory -Force -Path "runtime" | Out-Null
+
+          # Pull pre-verified static FP16 models directly from models-v1
+          $ErrorActionPreference = "Continue"
           gh release download models-v1 -p "640m_fp16.onnx" -D "runtime" --clobber
+          gh release download models-v1 -p "320n_fp16.onnx" -D "runtime" --clobber
+          gh release download models-v1 -p "320n.onnx" -D "runtime" --clobber
+          $ErrorActionPreference = "Stop"
+
           if (-not (Test-Path "runtime/640m_fp16.onnx")) {
             Write-Error "Failed to download 640m_fp16.onnx from models-v1 release."
             exit 1
           }
-          python -c "import os, shutil, nudenet, onnx; from onnxconverter_common import float16; src320 = os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx'); shutil.copy(src320, 'runtime/320n.onnx'); onnx.save(float16.convert_float_to_float16(onnx.load(src320), keep_io_types=True, disable_shape_infer=True), 'runtime/320n_fp16.onnx'); print('Runtime files:', os.listdir('runtime'))"
+
+          # Fallback: if 320n.onnx or 320n_fp16.onnx wasn't in models-v1, fetch & convert with static FP16 script
+          if ((-not (Test-Path "runtime/320n.onnx")) -or (-not (Test-Path "runtime/320n_fp16.onnx"))) {
+            pip install --quiet nudenet onnx onnxconverter-common onnxruntime
+            if (-not (Test-Path "runtime/320n.onnx")) {
+              python -c "import os, shutil, nudenet; shutil.copy(os.path.join(os.path.dirname(nudenet.__file__), '320n.onnx'), 'runtime/320n.onnx')"
+            }
+            if (-not (Test-Path "runtime/320n_fp16.onnx")) {
+              python scripts/optimize_models.py --m320 "runtime/320n.onnx" --m640 "" --out-dir "runtime"
+            }
+          }
+
+          Write-Host "Runtime files ready:"
+          Get-ChildItem "runtime" | Select-Object Name, @{Name="MB";Expression={[math]::Round($_.Length/1MB, 1)}}
 
       - name: Build CleanScreenGuard.exe (Release)
         shell: pwsh
@@ -87,16 +107,17 @@ jobs:
           $sizeMb = [math]::Round((Get-Item $setupExe).Length / 1MB, 1)
 
           $notes = @"
-          ## CleanScreen Guard $tag (Native Rust Edition — Windows 11)
+          ## CleanScreen Guard $tag (Native Rust — Performance Edition)
 
-          Complete native **Rust** rewrite of CleanScreen Guard (~$sizeMb MB installer, ~40–60 MB RAM, zero Python/Qt/OpenCV bloat).
+          Major performance update for Windows 11 (~$sizeMb MB installer, zero Python/Qt/OpenCV bloat, silent fan operation).
 
-          ### Highlights
-          - **Built-in NudeNet 640m (FP16 Default) + 320n:** High-accuracy 640m runs by default on GPU, with 320n included for ultra-low GPU or CPU-only fallback.
-          - **Native DXGI Desktop Duplication + UpdateLayeredWindow:** Raw BGRA capture and per-pixel-alpha click-through overlay with ``WDA_EXCLUDEFROMCAPTURE``.
-          - **DirectML GPU + FP16:** Powered by ``ort`` 2.0 + Microsoft ONNX Runtime DirectML with Power-Saving iGPU, Dedicated RTX/RX, and CPU-only modes.
-          - **Async AI Thread + Pure-Rust Motion Tracking:** Smooth 24–30 FPS box tracking between AI keyframes, Adaptive Scan Rate, and 0% GPU True Idle Sleep.
-          - **Windows 11 WebView2 Settings (EN / العربية RTL):** Crisp dark-mode UI with zero extra installer size.
+          ### What's New in $tag
+          - **Two-Stage Cascade (``320n_fp16`` Scout → ``640m_fp16`` Verifier):** Runs lightweight ``320n`` during normal browsing and gaming, waking high-accuracy ``640m`` only when a candidate appears or on periodic safety sweeps.
+          - **2.3× Faster Static FP16 Models:** Static-shape Hybrid FP16 graphs cut DirectML inference from ``5.65 ms → 2.52 ms`` (``320n``) and ``31.23 ms → 13.24 ms`` (``640m``).
+          - **D3D11 GPU-Side Mipmap Downscaling:** Hardware ``GenerateMips`` shrinks clean-screen PCIe readback from ``8.3 MB`` to ``0.5–2.0 MB`` and skips cursor-only desktop updates.
+          - **DirectML ``IoBinding`` & Zero-Alloc Frame Pool:** Reuses pre-bound GPU/CPU tensors and frame buffers for flat VRAM usage with zero leaks.
+          - **Verified Real-World Telemetry (RTX 3050M 60W, Active Explicit Testing):** ``0.93 W`` average GPU chip power (``6.31 W`` board avg), ``386 MB`` flat VRAM, ``0–1%`` PCIe bus load, ``46.5 °C`` (silent fans, ``0.631 V`` idle voltage floor).
+          - **Bilingual Settings UI (EN / العربية RTL):** Fixed UTF-8 Arabic rendering and added a direct Two-Stage Cascade toggle.
 
           ### Security & Verification
           - **Cloud-Built from Public Source** via GitHub Actions.

@@ -8,6 +8,7 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
 };
 
+#[allow(dead_code)]
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const OFFICIAL_GITHUB_URL: &str = "https://github.com/AmgedAlfakih/CleanScreen-Guard";
 pub const BUILTIN_MODEL_640M_ID: &str = "__builtin_nudenet_640m__";
@@ -26,6 +27,11 @@ pub struct AppConfig {
 
     pub primary_model: String,
     pub secondary_model: String,
+
+    // Two-Stage Cascade (320n Scout -> 640m Verifier)
+    pub cascade_mode: bool,
+    pub cascade_scout_threshold: f32,
+    pub cascade_verify_interval_secs: f32,
 
     pub ai_scan_fps: u32,
     pub target_fps: u32,
@@ -56,7 +62,10 @@ impl Default for AppConfig {
             use_fp16: true,
             primary_model: BUILTIN_MODEL_640M_ID.to_string(),
             secondary_model: NONE_MODEL_ID.to_string(),
-            ai_scan_fps: 6,
+            cascade_mode: true,
+            cascade_scout_threshold: 0.15,
+            cascade_verify_interval_secs: 2.5,
+            ai_scan_fps: 4,
             target_fps: 24,
             optical_flow_tracking: true,
             adaptive_scan_rate: true,
@@ -116,6 +125,12 @@ impl AppConfig {
                     cfg.primary_model = BUILTIN_MODEL_640M_ID.to_string();
                 } else if lower.ends_with("320n.onnx") || lower.ends_with("320n_fp16.onnx") {
                     cfg.primary_model = BUILTIN_MODEL_ID.to_string();
+                }
+                if cfg.cascade_scout_threshold < 0.14 {
+                    cfg.cascade_scout_threshold = 0.15;
+                }
+                if cfg.cascade_verify_interval_secs < 2.5 {
+                    cfg.cascade_verify_interval_secs = 2.5;
                 }
                 return cfg;
             }

@@ -2,9 +2,10 @@ use anyhow::{anyhow, Result};
 use half::f16;
 use ort::environment::Environment;
 use ort::ep::directml::{DirectML, PerformancePreference};
+use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::builder::GraphOptimizationLevel;
-use ort::session::Session;
-use ort::value::TensorRef;
+use ort::session::{IoBinding, Session};
+use ort::value::{DynValue, Tensor};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -93,7 +94,8 @@ pub fn list_available_models() -> Vec<(String, String)> {
 
 fn find_fp16_sibling(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
-    if name.to_lowercase().contains("_fp16") {
+    let lower = name.to_lowercase();
+    if lower.contains("_fp16") || lower.contains("_int8") || lower.contains("_qdq") {
         return None;
     }
     let stem = path.file_stem()?.to_str()?;
@@ -154,24 +156,195 @@ pub fn find_onnxruntime_dll() -> PathBuf {
 
 struct LoadedModel {
     session: Session,
+    io_binding: IoBinding,
+    input_name: String,
+    input_value: DynValue,
     name: String,
     input_size: usize,
-    is_fp16: bool,
+    precision_tag: &'static str,
     expects_fp16_input: bool,
-    f32_buf: Vec<f32>,
-    f16_buf: Vec<f16>,
+}
+
+impl LoadedModel {
+    fn run_on_frame(
+        &mut self,
+        frame_bgra: &[u8],
+        frame_w: usize,
+        frame_h: usize,
+        target_labels: &HashSet<&'static str>,
+        conf_threshold: f32,
+        out_hits: &mut Vec<Detection>,
+    ) {
+        let size = self.input_size;
+        let scale = size as f32 / (frame_w.max(frame_h) as f32);
+        let nw = ((frame_w as f32 * scale).round() as usize).clamp(1, size);
+        let nh = ((frame_h as f32 * scale).round() as usize).clamp(1, size);
+        let plane = size * size;
+        let inv_255 = 1.0f32 / 255.0f32;
+
+        // Fill pre-allocated owned tensor directly (zero heap allocations)
+        if self.expects_fp16_input {
+            let Ok((_, dst)) = self.input_value.try_extract_tensor_mut::<f16>() else {
+                return;
+            };
+            dst.fill(f16::ZERO);
+            for dy in 0..nh {
+                let sy = (((dy as f32 + 0.5) / scale) as usize).min(frame_h - 1);
+                let row_off = sy * frame_w * 4;
+                let dst_row = dy * size;
+                for dx in 0..nw {
+                    let sx = (((dx as f32 + 0.5) / scale) as usize).min(frame_w - 1);
+                    let p = row_off + sx * 4;
+                    let idx = dst_row + dx;
+                    dst[idx] = f16::from_f32(frame_bgra[p + 2] as f32 * inv_255);
+                    dst[plane + idx] = f16::from_f32(frame_bgra[p + 1] as f32 * inv_255);
+                    dst[2 * plane + idx] = f16::from_f32(frame_bgra[p] as f32 * inv_255);
+                }
+            }
+        } else {
+            let Ok((_, dst)) = self.input_value.try_extract_tensor_mut::<f32>() else {
+                return;
+            };
+            dst.fill(0.0);
+            for dy in 0..nh {
+                let sy = (((dy as f32 + 0.5) / scale) as usize).min(frame_h - 1);
+                let row_off = sy * frame_w * 4;
+                let dst_row = dy * size;
+                for dx in 0..nw {
+                    let sx = (((dx as f32 + 0.5) / scale) as usize).min(frame_w - 1);
+                    let p = row_off + sx * 4;
+                    let idx = dst_row + dx;
+                    dst[idx] = frame_bgra[p + 2] as f32 * inv_255;
+                    dst[plane + idx] = frame_bgra[p + 1] as f32 * inv_255;
+                    dst[2 * plane + idx] = frame_bgra[p] as f32 * inv_255;
+                }
+            }
+        }
+
+        // DirectML IoBinding: reuses bound output buffer and owned input tensor
+        if self.io_binding.bind_input(&self.input_name, &self.input_value).is_err() {
+            return;
+        }
+        let Ok(outputs) = self.session.run_binding(&self.io_binding) else {
+            return;
+        };
+
+        let inv_scale = 1.0f32 / scale;
+
+        // Supports both standard FP32 output and True FP16 output (keep_io_types=False)
+        if let Ok((shape, data)) = outputs[0].try_extract_tensor::<f32>() {
+            let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+            decode_yolo_output(
+                &dims,
+                |idx| data[idx],
+                inv_scale,
+                frame_w,
+                frame_h,
+                target_labels,
+                conf_threshold,
+                out_hits,
+            );
+        } else if let Ok((shape, data)) = outputs[0].try_extract_tensor::<f16>() {
+            let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+            decode_yolo_output(
+                &dims,
+                |idx| data[idx].to_f32(),
+                inv_scale,
+                frame_w,
+                frame_h,
+                target_labels,
+                conf_threshold,
+                out_hits,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_yolo_output<F: Fn(usize) -> f32>(
+    dims: &[usize],
+    at: F,
+    inv_scale: f32,
+    frame_w: usize,
+    frame_h: usize,
+    target_labels: &HashSet<&'static str>,
+    conf_threshold: f32,
+    out_hits: &mut Vec<Detection>,
+) {
+    if dims.len() != 3 {
+        return;
+    }
+    let (rows, cols, transposed) = if dims[1] < dims[2] {
+        (dims[2], dims[1], true)
+    } else {
+        (dims[1], dims[2], false)
+    };
+    if cols <= 4 {
+        return;
+    }
+
+    let num_classes = (cols - 4).min(NUDENET_LABELS.len());
+    for r in 0..rows {
+        let mut best_c = 0usize;
+        let mut best_s = 0.0f32;
+        for c in 0..num_classes {
+            let s = if transposed {
+                at((4 + c) * rows + r)
+            } else {
+                at(r * cols + 4 + c)
+            };
+            if s > best_s {
+                best_s = s;
+                best_c = c;
+            }
+        }
+        if best_s < conf_threshold {
+            continue;
+        }
+        let lbl = NUDENET_LABELS[best_c];
+        if !target_labels.contains(lbl) {
+            continue;
+        }
+        let (cx, cy, bw, bh) = if transposed {
+            (at(r), at(rows + r), at(2 * rows + r), at(3 * rows + r))
+        } else {
+            (at(r * cols), at(r * cols + 1), at(r * cols + 2), at(r * cols + 3))
+        };
+        let x1 = ((cx - bw * 0.5) * inv_scale).round() as i32;
+        let y1 = ((cy - bh * 0.5) * inv_scale).round() as i32;
+        let x2 = ((cx + bw * 0.5) * inv_scale).round() as i32;
+        let y2 = ((cy + bh * 0.5) * inv_scale).round() as i32;
+        if x2 > x1 + 4 && y2 > y1 + 4 {
+            out_hits.push(Detection {
+                x1: x1.clamp(0, frame_w as i32),
+                y1: y1.clamp(0, frame_h as i32),
+                x2: x2.clamp(0, frame_w as i32),
+                y2: y2.clamp(0, frame_h as i32),
+                score: best_s,
+                label: lbl.to_string(),
+            });
+        }
+    }
 }
 
 pub struct FastNSFWDetector {
     env: Environment,
     models: Vec<LoadedModel>,
+    scout_model: Option<LoadedModel>,
     compute_device: String,
     use_fp16: bool,
+    cascade_mode: bool,
     pub last_infer_ms: f32,
 }
 
 impl FastNSFWDetector {
-    pub fn new(primary: &str, secondary: &str, compute_device: &str, use_fp16: bool) -> Result<Self> {
+    pub fn new(
+        primary: &str,
+        secondary: &str,
+        compute_device: &str,
+        use_fp16: bool,
+        cascade_mode: bool,
+    ) -> Result<Self> {
         let dll_path = find_onnxruntime_dll();
         let env = ort::init_from(&dll_path)?
             .with_name("CleanScreenGuard")
@@ -180,11 +353,13 @@ impl FastNSFWDetector {
         let mut det = Self {
             env,
             models: Vec::new(),
+            scout_model: None,
             compute_device: compute_device.to_string(),
             use_fp16,
+            cascade_mode,
             last_infer_ms: 0.0,
         };
-        det.reload_models(primary, secondary, compute_device, use_fp16)?;
+        det.reload_models(primary, secondary, compute_device, use_fp16, cascade_mode)?;
         Ok(det)
     }
 
@@ -195,30 +370,21 @@ impl FastNSFWDetector {
         let names = self
             .models
             .iter()
-            .map(|m| format!("{} ({}px {})", m.name, m.input_size, if m.is_fp16 { "FP16" } else { "FP32" }))
+            .map(|m| format!("{} ({}px {})", m.name, m.input_size, m.precision_tag))
             .collect::<Vec<_>>()
             .join(" + ");
+        let cascade_tag = if let Some(ref scout) = self.scout_model {
+            format!("Cascade {} -> ", scout.name)
+        } else {
+            String::new()
+        };
         let dev = match self.compute_device.as_str() {
             "power_saving" => "iGPU / Power-Saving (DirectML)",
             "high_performance" => "Dedicated GPU (DirectML)",
             "cpu" => "CPU",
             _ => "Auto GPU (DirectML)",
         };
-        format!("{names}  |  {dev}")
-    }
-
-    pub fn short_tag(&self) -> String {
-        if self.models.is_empty() {
-            return "NO MODEL".to_string();
-        }
-        let prec = if self.models.iter().any(|m| m.is_fp16) { "FP16" } else { "FP32" };
-        let dev = match self.compute_device.as_str() {
-            "power_saving" => "iGPU",
-            "high_performance" => "dGPU",
-            "cpu" => "CPU",
-            _ => "GPU",
-        };
-        format!("{prec} | {dev}")
+        format!("{cascade_tag}{names}  |  {dev}")
     }
 
     pub fn reload_models(
@@ -227,9 +393,11 @@ impl FastNSFWDetector {
         secondary: &str,
         compute_device: &str,
         use_fp16: bool,
+        cascade_mode: bool,
     ) -> Result<()> {
         self.compute_device = compute_device.to_string();
         self.use_fp16 = use_fp16;
+        self.cascade_mode = cascade_mode;
         let prefer_fp16 = use_fp16 && compute_device != "cpu";
 
         let mut loaded = Vec::new();
@@ -269,7 +437,27 @@ impl FastNSFWDetector {
             }
         }
 
+        // Load lightweight 320n scout automatically when primary is a 640px model
+        let mut scout = None;
+        let primary_is_heavy = loaded.len() == 1 && loaded[0].input_size >= 640;
+        if cascade_mode && primary_is_heavy {
+            if let Some(scout_path) = resolve_model_path(BUILTIN_MODEL_ID, prefer_fp16) {
+                if !seen.contains(&scout_path) {
+                    match self.build_model(&scout_path, compute_device) {
+                        Ok(m) => scout = Some(m),
+                        Err(_) if prefer_fp16 => {
+                            if let Some(fp32) = resolve_model_path(BUILTIN_MODEL_ID, false) {
+                                scout = self.build_model(&fp32, compute_device).ok();
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
         self.models = loaded;
+        self.scout_model = scout;
         Ok(())
     }
 
@@ -277,10 +465,15 @@ impl FastNSFWDetector {
         let mut builder = Session::builder(&self.env)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow!("{e}"))?
+            .with_parallel_execution(false)
+            .map_err(|e| anyhow!("{e}"))?
             .with_intra_threads(2)
             .map_err(|e| anyhow!("{e}"))?;
 
         if compute_device != "cpu" {
+            builder = builder
+                .with_memory_pattern(false)
+                .map_err(|e| anyhow!("{e}"))?;
             let pref = match compute_device {
                 "power_saving" => PerformancePreference::MinimumPower,
                 "high_performance" => PerformancePreference::HighPerformance,
@@ -299,35 +492,78 @@ impl FastNSFWDetector {
             .unwrap_or("model.onnx")
             .to_string();
 
-        let input_size = if name.to_lowercase().contains("320") { 320 } else { 640 };
+        let lower_name = name.to_lowercase();
+        let input_size = if lower_name.contains("320") { 320 } else { 640 };
+
+        let input_name = session
+            .inputs()
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "images".to_string());
+        let output_name = session
+            .outputs()
+            .first()
+            .map(|o| o.name().to_string())
+            .unwrap_or_else(|| "output0".to_string());
+
         let expects_fp16_input = session
             .inputs()
             .first()
             .map(|i| format!("{:?}", i.dtype()).to_lowercase().contains("float16"))
             .unwrap_or(false);
-        let is_fp16 = expects_fp16_input || name.to_lowercase().contains("fp16");
+        let expects_fp16_output = session
+            .outputs()
+            .first()
+            .map(|o| format!("{:?}", o.dtype()).to_lowercase().contains("float16"))
+            .unwrap_or(false);
+
+        let precision_tag = if lower_name.contains("int8") || lower_name.contains("qdq") {
+            "INT8"
+        } else if expects_fp16_input && expects_fp16_output {
+            "FP16-IO"
+        } else if expects_fp16_input || lower_name.contains("fp16") {
+            "FP16"
+        } else {
+            "FP32"
+        };
 
         let total = 3 * input_size * input_size;
-        let f32_buf = vec![0.0f32; total];
-        let f16_buf = vec![f16::ZERO; if expects_fp16_input { total } else { 0 }];
+        let input_value: DynValue = if expects_fp16_input {
+            Tensor::from_array((
+                [1usize, 3, input_size, input_size],
+                vec![f16::ZERO; total].into_boxed_slice(),
+            ))?
+            .into_dyn()
+        } else {
+            Tensor::from_array((
+                [1usize, 3, input_size, input_size],
+                vec![0.0f32; total].into_boxed_slice(),
+            ))?
+            .into_dyn()
+        };
 
-        // Silent background DirectML shader warmup so first real scan never hitches
-        if expects_fp16_input {
-            if let Ok(t) = TensorRef::from_array_view(([1usize, 3, input_size, input_size], &*f16_buf)) {
-                let _ = session.run(ort::inputs![t]);
-            }
-        } else if let Ok(t) = TensorRef::from_array_view(([1usize, 3, input_size, input_size], &*f32_buf)) {
-            let _ = session.run(ort::inputs![t]);
+        let mut io_binding = session.create_binding()?;
+        let cpu_out_mem = MemoryInfo::new(
+            AllocationDevice::CPU,
+            0,
+            AllocatorType::Device,
+            MemoryType::CPUOutput,
+        )?;
+        io_binding.bind_output_to_device(&output_name, &cpu_out_mem)?;
+
+        if io_binding.bind_input(&input_name, &input_value).is_ok() {
+            let _ = session.run_binding(&io_binding);
         }
 
         Ok(LoadedModel {
             session,
+            io_binding,
+            input_name,
+            input_value,
             name,
             input_size,
-            is_fp16,
+            precision_tag,
             expects_fp16_input,
-            f32_buf,
-            f16_buf,
         })
     }
 
@@ -338,112 +574,45 @@ impl FastNSFWDetector {
         frame_h: usize,
         target_labels: &HashSet<&'static str>,
         conf_threshold: f32,
+        allow_scout: bool,
+        scout_threshold: f32,
     ) -> Vec<Detection> {
         if self.models.is_empty() || target_labels.is_empty() {
             return Vec::new();
         }
         let t0 = Instant::now();
+
+        // Stage 1: Fast 320n Scout on clean frames (skips 640m when screen is clean)
+        if allow_scout && self.cascade_mode {
+            if let Some(ref mut scout) = self.scout_model {
+                let mut scout_hits = Vec::new();
+                let thresh = scout_threshold.min(conf_threshold).clamp(0.08, 0.22);
+                scout.run_on_frame(
+                    frame_bgra,
+                    frame_w,
+                    frame_h,
+                    target_labels,
+                    thresh,
+                    &mut scout_hits,
+                );
+                if scout_hits.is_empty() {
+                    self.last_infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    return Vec::new();
+                }
+            }
+        }
+
+        // Stage 2: Full-accuracy 640m Verifier
         let mut raw_hits: Vec<Detection> = Vec::new();
-
         for model in &mut self.models {
-            let size = model.input_size;
-            let scale = size as f32 / (frame_w.max(frame_h) as f32);
-            let nw = ((frame_w as f32 * scale).round() as usize).clamp(1, size);
-            let nh = ((frame_h as f32 * scale).round() as usize).clamp(1, size);
-
-            model.f32_buf.fill(0.0);
-            let plane = size * size;
-            let inv_255 = 1.0f32 / 255.0f32;
-            for dy in 0..nh {
-                let sy = ((dy as f32 + 0.5) / scale) as usize;
-                let sy = sy.min(frame_h - 1);
-                let row_off = sy * frame_w * 4;
-                let dst_row = dy * size;
-                for dx in 0..nw {
-                    let sx = ((dx as f32 + 0.5) / scale) as usize;
-                    let sx = sx.min(frame_w - 1);
-                    let p = row_off + sx * 4;
-                    let idx = dst_row + dx;
-                    model.f32_buf[idx] = frame_bgra[p + 2] as f32 * inv_255;
-                    model.f32_buf[plane + idx] = frame_bgra[p + 1] as f32 * inv_255;
-                    model.f32_buf[2 * plane + idx] = frame_bgra[p] as f32 * inv_255;
-                }
-            }
-
-            let outputs = if model.expects_fp16_input {
-                for (dst, &src) in model.f16_buf.iter_mut().zip(model.f32_buf.iter()) {
-                    *dst = f16::from_f32(src);
-                }
-                match TensorRef::from_array_view(([1usize, 3, size, size], &*model.f16_buf)) {
-                    Ok(t) => model.session.run(ort::inputs![t]).ok(),
-                    Err(_) => None,
-                }
-            } else {
-                match TensorRef::from_array_view(([1usize, 3, size, size], &*model.f32_buf)) {
-                    Ok(t) => model.session.run(ort::inputs![t]).ok(),
-                    Err(_) => None,
-                }
-            };
-
-            let Some(outputs) = outputs else { continue };
-            let Ok((shape, data)) = outputs[0].try_extract_tensor::<f32>() else { continue };
-            let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            if dims.len() != 3 {
-                continue;
-            }
-
-            let inv_scale = 1.0f32 / scale;
-            let (rows, cols, transposed) = if dims[1] < dims[2] {
-                (dims[2], dims[1], true)
-            } else {
-                (dims[1], dims[2], false)
-            };
-            if cols <= 4 {
-                continue;
-            }
-
-            let num_classes = (cols - 4).min(NUDENET_LABELS.len());
-            for r in 0..rows {
-                let mut best_c = 0usize;
-                let mut best_s = 0.0f32;
-                for c in 0..num_classes {
-                    let s = if transposed {
-                        data[(4 + c) * rows + r]
-                    } else {
-                        data[r * cols + 4 + c]
-                    };
-                    if s > best_s {
-                        best_s = s;
-                        best_c = c;
-                    }
-                }
-                if best_s < conf_threshold {
-                    continue;
-                }
-                let lbl = NUDENET_LABELS[best_c];
-                if !target_labels.contains(lbl) {
-                    continue;
-                }
-                let (cx, cy, bw, bh) = if transposed {
-                    (data[r], data[rows + r], data[2 * rows + r], data[3 * rows + r])
-                } else {
-                    (data[r * cols], data[r * cols + 1], data[r * cols + 2], data[r * cols + 3])
-                };
-                let x1 = ((cx - bw * 0.5) * inv_scale).round() as i32;
-                let y1 = ((cy - bh * 0.5) * inv_scale).round() as i32;
-                let x2 = ((cx + bw * 0.5) * inv_scale).round() as i32;
-                let y2 = ((cy + bh * 0.5) * inv_scale).round() as i32;
-                if x2 > x1 + 4 && y2 > y1 + 4 {
-                    raw_hits.push(Detection {
-                        x1: x1.clamp(0, frame_w as i32),
-                        y1: y1.clamp(0, frame_h as i32),
-                        x2: x2.clamp(0, frame_w as i32),
-                        y2: y2.clamp(0, frame_h as i32),
-                        score: best_s,
-                        label: lbl.to_string(),
-                    });
-                }
-            }
+            model.run_on_frame(
+                frame_bgra,
+                frame_w,
+                frame_h,
+                target_labels,
+                conf_threshold,
+                &mut raw_hits,
+            );
         }
 
         self.last_infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
